@@ -1,8 +1,7 @@
 const APP_ID = "6774bd10adcd4974ae9d320147124bc5";
-
-// CHANGE THIS to your Vercel token function (or "/api" if token lives in same project)
 const TOKEN_API_BASE = "https://peerapp-token-server.vercel.app/api";
-// If you protected /api/token with a shared pass, set it here, else leave null
+// Optional: if you set ROOM_PASSWORD in the token function, put the same here.
+// We pass it via query string to AVOID CORS preflight.
 const ROOM_PASSWORD = null;
 
 /* ====== URL params & mode ====== */
@@ -23,7 +22,7 @@ const uid = displayName;
 
 /* ====== DOM refs ====== */
 const audioUI       = document.getElementById("audio-call");
-const audioList     = document.getElementById("audio-list"); // optional custom list; may be null
+const audioList     = document.getElementById("audio-list");
 const audioMicBtn   = document.getElementById("audio-mic");
 const audioMicText  = document.getElementById("audio-mic-text");
 const audioLeaveBtn = document.getElementById("audio-leave");
@@ -33,7 +32,6 @@ const camBtn = document.getElementById("camera-btn");
 const micBtn = document.getElementById("mic-btn");
 const leaveBtn = document.getElementById("leave-btn");
 
-// Fallback labels if you use the simple 2-avatar audio UI
 const localLabelEl  = document.getElementById("local-label");
 const remoteLabelEl = document.getElementById("remote-label");
 
@@ -49,23 +47,37 @@ let timerInt = null;
 const ua = navigator.userAgent.toLowerCase();
 const isSafari = ua.includes("safari") && !ua.includes("chrome") && !ua.includes("android");
 
+/* ====== Helpers ====== */
+function tokenUrl(path){
+  const base = TOKEN_API_BASE.replace(/\/$/, "");
+  const p = String(path || "").replace(/^\//, "");
+  return `${base}/${p}`;
+}
+
 /* ====== Token fetch/renew ====== */
 async function fetchRtcToken({ channel, uid, role = "publisher" }){
-  const url = new URL("token", TOKEN_API_BASE);
-  url.searchParams.set("channel", channel);
-  url.searchParams.set("uid", uid);
-  url.searchParams.set("role", role);
-  const headers = {};
-  if (ROOM_PASSWORD) headers["x-room-password"] = ROOM_PASSWORD;
+  const qs = new URLSearchParams({ channel, uid, role });
+  if (ROOM_PASSWORD) qs.set("pw", ROOM_PASSWORD); // avoids CORS preflight
+  const url = `${tokenUrl("token")}?${qs.toString()}`;
 
-  const res = await fetch(url.toString(), { headers, cache: "no-store" });
-  if (!res.ok) {
-    const msg = await res.text().catch(()=>res.statusText);
-    throw new Error(`Token request failed: ${res.status} ${msg}`);
+  try{
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) {
+      const msg = await res.text().catch(()=>res.statusText);
+      throw new Error(`Token HTTP ${res.status} ${msg}`);
+    }
+    const data = await res.json();
+    if (!data?.token) throw new Error("No token in response");
+    return data.token;
+  }catch(err){
+    // Network/CORS/Mixed-content issues land here
+    console.error("[token] fetch error:", err);
+    // Give a clearer hint
+    if (location.protocol === "https:" && tokenUrl("").startsWith("http://")) {
+      throw new Error("Blocked: mixed content (use HTTPS token API).");
+    }
+    throw err;
   }
-  const data = await res.json();
-  if (!data?.token) throw new Error("Token server did not return a token");
-  return data.token;
 }
 
 /* ====== Mobile: unlock audio & wakelock ====== */
@@ -185,7 +197,7 @@ function makeAudioTile(id, labelText, isLocal=false){
   return root;
 }
 function ensureAudioTile(uidKey, label){
-  if (!audioList) return null; // if your HTML doesn't have #audio-list, skip tiles
+  if (!audioList) return null;
   if (audioTiles.has(uidKey)) return audioTiles.get(uidKey).root;
   return makeAudioTile(uidKey, label, uidKey === 'local');
 }
@@ -207,7 +219,7 @@ function setAudioTileSpeaking(uidKey, speaking){
   t.root.classList.toggle('speaking', !!speaking);
 }
 
-/* ====== Fallback: 2-avatar audio UI labels ====== */
+/* ====== Fallback 2-avatar labels ====== */
 function setSimpleAudioLabels(remoteName){
   if (localLabelEl)  localLabelEl.textContent  = displayName;
   if (remoteLabelEl) remoteLabelEl.textContent = remoteName || "Remote";
@@ -267,7 +279,7 @@ async function init(){
     if (title) title.textContent = `Audio call — ${displayName}`;
   }
 
-  // Safari tends to prefer h264 for better HW decode
+  // Safari prefers h264 for HW decode
   client = AgoraRTC.createClient({ mode: "rtc", codec: isSafari ? "h264" : "vp8" });
 
   // Token renew handlers
@@ -301,7 +313,6 @@ async function init(){
       try { user.audioTrack.play(); }
       catch { showAudioUnlockOverlay(replayRemoteAudioTracks); }
 
-      // Audio UI: either rich list (if #audio-list exists) or simple labels
       if (isAudioMode){
         if (audioList) {
           ensureAudioTile(user.uid, String(user.uid));
@@ -331,7 +342,7 @@ async function init(){
     }
   });
 
-  // ===== Join with secure short-lived token =====
+  // ===== Fetch token & join =====
   const joinToken = await fetchRtcToken({ channel: channelName, uid, role: "publisher" });
   await client.join(APP_ID, channelName, joinToken, uid);
 
@@ -349,7 +360,7 @@ async function init(){
       ensureAudioTile('local', displayName);
       setAudioTileMuted('local', false);
     } else {
-      setSimpleAudioLabels(null); // set local name; remote remains "Remote" until someone joins
+      setSimpleAudioLabels(null);
     }
 
     if (client.enableAudioVolumeIndicator) client.enableAudioVolumeIndicator();
@@ -365,8 +376,6 @@ async function init(){
 
     startTimer();
     requestWakeLock();
-
-    // Try to start any already-subscribed remote audio; fix autoplay on iOS if blocked
     try { await replayRemoteAudioTracks(); } catch { showAudioUnlockOverlay(replayRemoteAudioTracks); }
 
   } else {
