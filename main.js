@@ -1,5 +1,5 @@
 const APP_ID = "6774bd10adcd4974ae9d320147124bc5";
-const TOKEN_API_BASE = "https://peerapp-token-server.vercel.app/api";
+const TOKEN_API_BASE = "/api";
 // Optional: if you set ROOM_PASSWORD in the token function, put the same here.
 // We pass it via query string to AVOID CORS preflight.
 const ROOM_PASSWORD = null;
