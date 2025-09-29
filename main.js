@@ -1,5 +1,11 @@
+// put this at the very top of main.js and use TOKEN_API_BASE below
+const isFileLike = location.protocol === 'capacitor:' || location.protocol === 'file:';
+const TOKEN_API_BASE = isFileLike
+  ? 'https://peer-app-git-main-amirndrs-projects.vercel.app/api'   // 👈 your deployed site’s /api
+  : '/api';
+
 const APP_ID = "6774bd10adcd4974ae9d320147124bc5";
-const TOKEN_API_BASE = "/api";
+// const TOKEN_API_BASE = "/api";
 // Optional: if you set ROOM_PASSWORD in the token function, put the same here.
 // We pass it via query string to AVOID CORS preflight.
 const ROOM_PASSWORD = null;
@@ -426,8 +432,17 @@ async function init(){
 }
 
 /* ===== Kickoff ===== */
-init().catch(err => {
-  console.error("[RTC init] failed:", err);
-  alert(`Failed to start call: ${err.message || err}`);
-  window.location = "lobby.html";
-});
+// init().catch(err => {
+//   console.error("[RTC init] failed:", err);
+//   alert(`Failed to start call: ${err.message || err}`);
+//   window.location = "lobby.html";
+// });
+
+(async () => {
+  try { await init(); }
+  catch (e) {
+    await new Promise(r => setTimeout(r, 600));
+    try { await init(); }
+    catch { window.location.replace("lobby.html"); }
+  }
+})();
