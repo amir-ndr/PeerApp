@@ -60,24 +60,21 @@ function tokenUrl(path){
   return `${base}/${p}`;
 }
 
-// sanitize user-visible name; but do NOT use as Agora UID
-function sanitizeName(s) {
-  return (s || '').replace(/[^\p{L}\p{N}\s._-]/gu, '').slice(0, 30) || makeGuestId();
-}
-const displayName = sanitizeName(providedName);
-
-// ask the token server for a server-assigned UID
-async function fetchRtcToken({ channel, role = "publisher" }){
+/* ====== Token fetch/renew ====== */
+async function fetchRtcToken({ channel }){
   const res = await fetch(tokenUrl("token"), {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(ROOM_PASSWORD ? { "x-room-password": ROOM_PASSWORD } : {})
+    },
     cache: "no-store",
-    body: JSON.stringify({ channel, role, name: displayName /* optional */ })
+    body: JSON.stringify({ channel })
   });
   if (!res.ok) throw new Error(`Token HTTP ${res.status}`);
-  const data = await res.json();
-  if (!data?.token || !data?.uid) throw new Error("Bad token payload");
-  return data; // { token, uid }
+  const data = await res.json(); // { token, uid }
+  if (!data?.token || typeof data?.uid !== "number") throw new Error("Bad token payload");
+  return data;
 }
 
 
@@ -393,7 +390,7 @@ async function init(){
   // ===== Fetch token & join =====
   // const joinToken = await fetchRtcToken({ channel: channelName, uid, role: "publisher" });
   // await client.join(APP_ID, channelName, joinToken, uid);
-  const { token: joinToken, uid } = await fetchRtcToken({ channel: channelName, role: "publisher" });
+  const { token: joinToken, uid } = await fetchRtcToken({ channel: channelName });
   await client.join(APP_ID, channelName, joinToken, uid);
 
   if (isAudioMode){
