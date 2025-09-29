@@ -1,8 +1,10 @@
-// main.js — Multi-user video & audio UI with Agora RTC, named tiles
-
+/* ====== CONFIG ====== */
 const APP_ID = "6774bd10adcd4974ae9d320147124bc5";
-let token = null; // set a valid RTC token if your app uses certificates
+const TOKEN_API_BASE = "https://peerapp-token-server.vercel.app/api";
+// If you protected the token route with ROOM_PASSWORD, set it here or leave null
+const ROOM_PASSWORD = null;
 
+/* ====== URL params & mode ====== */
 const params = new URLSearchParams(window.location.search);
 const roomId = (params.get("room") || "").trim();
 const rawMode = (params.get("mode") || "video").trim().toLowerCase();
@@ -10,21 +12,15 @@ const mode = (rawMode === "audio" || rawMode === "video") ? rawMode : "video";
 const providedName = (params.get("name") || "").trim();
 if (!roomId) window.location = "lobby.html";
 const channelName = `call_${mode}_${roomId}`;
-
 const isAudioMode = mode === "audio";
 
-/* === Name/UID handling ===
-   Agora supports string UIDs. We'll use the provided name if present;
-   otherwise generate a short random guest ID.
-*/
-function makeGuestId() {
-  return `Guest-${Math.random().toString(36).slice(2, 6)}`;
-}
+/* ====== Names & UIDs ====== */
+function makeGuestId(){ return `Guest-${Math.random().toString(36).slice(2, 6)}`; }
 const displayName = providedName || makeGuestId();
-// IMPORTANT: using the *name* as the RTC uid so peers see it as user.uid
-const uid = displayName; // (string uid is OK)
+// Use the name as the Agora RTC UID (string uid supported)
+const uid = displayName;
 
-/* ---- DOM refs ---- */
+/* ====== DOM refs ====== */
 const audioUI       = document.getElementById("audio-call");
 const audioList     = document.getElementById("audio-list");
 const audioMicBtn   = document.getElementById("audio-mic");
@@ -36,15 +32,35 @@ const camBtn = document.getElementById("camera-btn");
 const micBtn = document.getElementById("mic-btn");
 const leaveBtn = document.getElementById("leave-btn");
 
+/* ====== RTC state ====== */
 let client;
 let localTracks = { audio: null, video: null };
 const remoteUsers = new Map(); // uid -> user
 const tiles = new Map();       // video tiles
 const audioTiles = new Map();  // audio tiles
-
 let timerInt = null;
 
-/* ---- Timer ---- */
+/* ====== Token fetch/renew helpers ====== */
+async function fetchRtcToken({ channel, uid, role = "publisher" }){
+  const url = new URL("token", TOKEN_API_BASE);
+  url.searchParams.set("channel", channel);
+  url.searchParams.set("uid", uid);
+  url.searchParams.set("role", role);
+
+  const headers = {};
+  if (ROOM_PASSWORD) headers["x-room-password"] = ROOM_PASSWORD;
+
+  const res = await fetch(url.toString(), { headers, cache: "no-store" });
+  if (!res.ok) {
+    const msg = await res.text().catch(()=>res.statusText);
+    throw new Error(`Token request failed: ${res.status} ${msg}`);
+  }
+  const data = await res.json();
+  if (!data?.token) throw new Error("Token server did not return a token");
+  return data.token;
+}
+
+/* ====== Timer ====== */
 function startTimer(){
   const el = document.getElementById("call-timer");
   if (!el) return;
@@ -55,7 +71,7 @@ function startTimer(){
   }, 1000);
 }
 
-/* ---- Video tile helpers ---- */
+/* ====== Video tile helpers ====== */
 function makeTile(id, labelText){
   const tile = document.createElement("div");
   tile.className = "tile";
@@ -81,7 +97,6 @@ function ensureLocalTile(){
 }
 function ensureRemoteTile(remoteUid){
   if (tiles.has(remoteUid)) return tiles.get(remoteUid);
-  // remoteUid will be the *name string* if others did the same
   return makeTile(remoteUid, String(remoteUid));
 }
 function removeTile(id){
@@ -90,7 +105,7 @@ function removeTile(id){
   tiles.delete(id);
 }
 
-/* ---- Audio tile helpers ---- */
+/* ====== Audio tile helpers ====== */
 function makeAudioTile(id, labelText, isLocal=false){
   const root = document.createElement('div');
   root.className = `a-tile${isLocal ? ' local' : ''}`;
@@ -138,7 +153,7 @@ function setAudioTileSpeaking(uidKey, speaking){
   t.root.classList.toggle('speaking', !!speaking);
 }
 
-/* ---- Control handlers ---- */
+/* ====== Controls ====== */
 async function toggleMic(){
   if (!localTracks.audio) return;
   const wasEnabled = localTracks.audio.isEnabled;
@@ -183,31 +198,49 @@ async function leave(){
   }
 }
 
-/* ---- RTC flow ---- */
+/* ====== Init / RTC flow ====== */
 async function init(){
   if (isAudioMode){
     document.body.classList.add("audio-mode");
     if (audioUI) audioUI.hidden = false;
-    // Update the title with your name
     const title = document.getElementById('call-title');
     if (title) title.textContent = `Audio call — ${displayName}`;
   }
 
   client = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
 
+  // Token renew handlers
+  client.on("token-privilege-will-expire", async () => {
+    try {
+      const newToken = await fetchRtcToken({ channel: channelName, uid, role: "publisher" });
+      await client.renewToken(newToken);
+    } catch (e) {
+      console.error("[token] renew failed:", e);
+    }
+  });
+  client.on("token-privilege-did-expire", async () => {
+    try {
+      const newToken = await fetchRtcToken({ channel: channelName, uid, role: "publisher" });
+      await client.renewToken(newToken);
+    } catch (e) {
+      console.error("[token] renew after expiry failed:", e);
+      alert("Your session expired. Please rejoin.");
+      window.location = "lobby.html";
+    }
+  });
+
+  // Remote events
   client.on("user-published", async (user, mediaType) => {
     remoteUsers.set(user.uid, user);
     await client.subscribe(user, mediaType);
 
     if (mediaType === "video"){
-      // Label with their *string uid* (the name)
       ensureRemoteTile(user.uid);
       user.videoTrack.play(`player-${user.uid}`);
     }
     if (mediaType === "audio"){
       user.audioTrack.play();
       if (isAudioMode){
-        // For audio tiles, label with their *string uid* (the name)
         ensureAudioTile(user.uid, String(user.uid));
         setAudioTileMuted(user.uid, false);
       }
@@ -229,14 +262,20 @@ async function init(){
     if (isAudioMode) removeAudioTile(user.uid);
   });
 
-  // Join with your *name* as uid (string)
-  await client.join(APP_ID, channelName, token, uid);
+  // ===== Join with secure short-lived token =====
+  const joinToken = await fetchRtcToken({ channel: channelName, uid, role: "publisher" });
+  await client.join(APP_ID, channelName, joinToken, uid);
 
   if (isAudioMode){
-    localTracks.audio = await AgoraRTC.createMicrophoneAudioTrack();
+    try{
+      localTracks.audio = await AgoraRTC.createMicrophoneAudioTrack();
+    }catch(e){
+      console.error("Mic error:", e);
+      alert("Microphone access denied or unavailable.");
+      throw e;
+    }
     await client.publish([localTracks.audio]);
 
-    // Local tile in audio grid labeled with *your name*
     ensureAudioTile('local', displayName);
     setAudioTileMuted('local', false);
 
@@ -253,14 +292,20 @@ async function init(){
 
     startTimer();
   } else {
-    const [mic, cam] = await AgoraRTC.createMicrophoneAndCameraTracks(
-      {},
-      { encoderConfig: { width: 1280, height: 720, frameRate: 30 } }
-    );
+    let mic, cam;
+    try{
+      [mic, cam] = await AgoraRTC.createMicrophoneAndCameraTracks(
+        {},
+        { encoderConfig: { width: 1280, height: 720, frameRate: 30 } }
+      );
+    }catch(e){
+      console.error("Cam/Mic error:", e);
+      alert("Camera/Microphone access denied or unavailable.");
+      throw e;
+    }
     localTracks.audio = mic;
     localTracks.video = cam;
 
-    // Local video tile label with your name
     ensureLocalTile();
     cam.play(`player-local`);
     await client.publish([mic, cam]);
@@ -291,7 +336,7 @@ async function init(){
   if (audioMicBtn){ audioMicBtn.setAttribute('aria-pressed','true'); audioMicBtn.title = 'Toggle mic (currently ON)'; }
 }
 
-/* Kickoff */
+/* ===== Kickoff ===== */
 init().catch(err => {
   console.error("[RTC init] failed:", err);
   alert(`Failed to start call: ${err.message || err}`);
