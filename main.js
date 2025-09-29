@@ -305,6 +305,8 @@ async function leave(){
 
 /* ====== Init / RTC flow ====== */
 async function init(){
+  if (window.__peerInit) return;   // guard
+  window.__peerInit = true;
   if (isAudioMode){
     document.body.classList.add("audio-mode");
     if (audioUI) audioUI.hidden = false;
@@ -314,6 +316,24 @@ async function init(){
 
   // Safari prefers h264 for HW decode
   client = AgoraRTC.createClient({ mode: "rtc", codec: isSafari ? "h264" : "vp8" });
+  
+  client.on("connection-state-change", (cur, prev, reason) => {
+    console.log("[rtc] state", prev, "->", cur, "reason:", reason);
+    const barId = "net-banner";
+    let bar = document.getElementById(barId);
+    if (cur === "DISCONNECTED" || cur === "RECONNECTING") {
+      if (!bar){
+        bar = document.createElement("div");
+        bar.id = barId;
+        bar.style.cssText = "position:fixed;top:0;left:0;right:0;padding:8px 12px;background:#2b2f3a;color:#ffd863;text-align:center;z-index:9999;font-weight:600";
+        document.body.appendChild(bar);
+      }
+      bar.textContent = (cur === "RECONNECTING") ? "Reconnecting…" : "Disconnected";
+    } else {
+      bar?.remove();
+    }
+  });
+  
 
   // Token renew handlers
   client.on("token-privilege-will-expire", async () => {
@@ -474,7 +494,7 @@ async function init(){
 (async () => {
   try { await init(); }
   catch (e) {
-    await new Promise(r => setTimeout(r, 600));
+    await new Promise(r => setTimeout(r, 200));
     try { await init(); }
     catch { window.location.replace("lobby.html"); }
   }
