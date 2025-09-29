@@ -232,36 +232,63 @@ function setSimpleAudioLabels(remoteName){
 }
 
 /* ====== Controls ====== */
-async function toggleMic(){
-  if (!localTracks.audio) return;
-  const wasEnabled = localTracks.audio.isEnabled;
-  const willEnable = !wasEnabled;
-  await localTracks.audio.setEnabled(willEnable);
+// keep these at top-level state
+let micOn = false;
+let camOn = false;
 
-  const setBtnState = (btn, enabled) => {
+function updateMicUI(on){
+  const setBtn = (btn, on2) => {
     if (!btn) return;
-    btn.style.backgroundColor = enabled ? 'rgba(179,102,249,0.9)' : 'rgba(255,80,80,1)';
-    btn.setAttribute('aria-pressed', String(enabled));
-    btn.title = enabled ? 'Toggle mic (currently ON)' : 'Toggle mic (currently OFF)';
+    btn.style.backgroundColor = on2 ? 'rgba(179,102,249,0.9)' : 'rgba(255,80,80,1)';
+    btn.setAttribute('aria-pressed', String(on2));
+    btn.title = on2 ? 'Toggle mic (currently ON)' : 'Toggle mic (currently OFF)';
   };
+  setBtn(micBtn, on);
+  setBtn(audioMicBtn, on);
+  if (audioMicText) audioMicText.textContent = on ? 'Mute' : 'Unmute';
+  setAudioTileMuted('local', !on);
+}
 
-  setBtnState(micBtn, willEnable);
-  if (audioMicBtn) setBtnState(audioMicBtn, willEnable);
-  if (audioMicText) audioMicText.textContent = willEnable ? 'Mute' : 'Unmute';
+function updateCamUI(on){
+  if (!camBtn) return;
+  camBtn.style.backgroundColor = on ? 'rgba(179,102,249,0.9)' : 'rgba(255,80,80,1)';
+  camBtn.setAttribute('aria-pressed', String(on));
+  camBtn.title = on ? 'Toggle camera (currently ON)' : 'Toggle camera (currently OFF)';
+}
 
-  setAudioTileMuted('local', !willEnable);
+async function toggleMic(){
+  const track = localTracks.audio;
+  if (!track) { console.warn("mic not ready"); return; }
+
+  const next = !micOn;                 // desired ON state
+  try {
+    if (typeof track.setMuted === 'function') {
+      await track.setMuted(!next);     // setMuted(true) => muted
+    } else if (typeof track.setEnabled === 'function') {
+      await track.setEnabled(next);    // fallback
+    }
+    micOn = next;
+    updateMicUI(micOn);
+  } catch (e) {
+    console.error("toggleMic failed:", e);
+  }
 }
 
 async function toggleCam(){
-  if (isAudioMode || !localTracks.video) return;
-  const wasEnabled = localTracks.video.isEnabled;
-  const willEnable = !wasEnabled;
-  await localTracks.video.setEnabled(willEnable);
+  const track = localTracks.video;
+  if (isAudioMode || !track) { console.warn("cam not ready or audio mode"); return; }
 
-  if (camBtn){
-    camBtn.style.backgroundColor = willEnable ? 'rgba(179,102,249,0.9)' : 'rgba(255,80,80,1)';
-    camBtn.setAttribute('aria-pressed', String(willEnable));
-    camBtn.title = willEnable ? 'Toggle camera (currently ON)' : 'Toggle camera (currently OFF)';
+  const next = !camOn;                 // desired ON state
+  try {
+    if (typeof track.setEnabled === 'function') {
+      await track.setEnabled(next);    // preferred
+    } else if (typeof track.setMuted === 'function') {
+      await track.setMuted(!next);     // fallback
+    }
+    camOn = next;
+    updateCamUI(camOn);
+  } catch (e) {
+    console.error("toggleCam failed:", e);
   }
 }
 
@@ -355,6 +382,8 @@ async function init(){
   if (isAudioMode){
     try{
       localTracks.audio = await AgoraRTC.createMicrophoneAudioTrack();
+      micOn = true;
+      updateMicUI(true);
     }catch(e){
       console.error("Mic error:", e);
       alert("Microphone access denied or unavailable.");
@@ -398,6 +427,10 @@ async function init(){
     }
     localTracks.audio = mic;
     localTracks.video = cam;
+    micOn = true;
+    camOn = true;
+    updateMicUI(true);
+    updateCamUI(true);
 
     ensureLocalTile();
     cam.play(`player-local`);
