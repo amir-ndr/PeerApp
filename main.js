@@ -1,10 +1,7 @@
-// main.js — Secure multi-user audio/video with Agora RTC, Vercel tokens, mobile fixes
-
-/* ====== CONFIG ====== */
 const APP_ID = "6774bd10adcd4974ae9d320147124bc5";
 
 // CHANGE THIS to your Vercel token function (or "/api" if token lives in same project)
-const TOKEN_API_BASE = "https://peer-app-gold.vercel.app/api";
+const TOKEN_API_BASE = "https://peerapp-token-server.vercel.app/api";
 // If you protected /api/token with a shared pass, set it here, else leave null
 const ROOM_PASSWORD = null;
 
