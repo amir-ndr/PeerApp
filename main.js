@@ -60,31 +60,26 @@ function tokenUrl(path){
   return `${base}/${p}`;
 }
 
-/* ====== Token fetch/renew ====== */
-async function fetchRtcToken({ channel, uid, role = "publisher" }){
-  const qs = new URLSearchParams({ channel, uid, role });
-  if (ROOM_PASSWORD) qs.set("pw", ROOM_PASSWORD); // avoids CORS preflight
-  const url = `${tokenUrl("token")}?${qs.toString()}`;
-
-  try{
-    const res = await fetch(url, { cache: "no-store" });
-    if (!res.ok) {
-      const msg = await res.text().catch(()=>res.statusText);
-      throw new Error(`Token HTTP ${res.status} ${msg}`);
-    }
-    const data = await res.json();
-    if (!data?.token) throw new Error("No token in response");
-    return data.token;
-  }catch(err){
-    // Network/CORS/Mixed-content issues land here
-    console.error("[token] fetch error:", err);
-    // Give a clearer hint
-    if (location.protocol === "https:" && tokenUrl("").startsWith("http://")) {
-      throw new Error("Blocked: mixed content (use HTTPS token API).");
-    }
-    throw err;
-  }
+// sanitize user-visible name; but do NOT use as Agora UID
+function sanitizeName(s) {
+  return (s || '').replace(/[^\p{L}\p{N}\s._-]/gu, '').slice(0, 30) || makeGuestId();
 }
+const displayName = sanitizeName(providedName);
+
+// ask the token server for a server-assigned UID
+async function fetchRtcToken({ channel, role = "publisher" }){
+  const res = await fetch(tokenUrl("token"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    cache: "no-store",
+    body: JSON.stringify({ channel, role, name: displayName /* optional */ })
+  });
+  if (!res.ok) throw new Error(`Token HTTP ${res.status}`);
+  const data = await res.json();
+  if (!data?.token || !data?.uid) throw new Error("Bad token payload");
+  return data; // { token, uid }
+}
+
 
 /* ====== Mobile: unlock audio & wakelock ====== */
 let audioUnlockShown = false;
@@ -396,7 +391,9 @@ async function init(){
   });
 
   // ===== Fetch token & join =====
-  const joinToken = await fetchRtcToken({ channel: channelName, uid, role: "publisher" });
+  // const joinToken = await fetchRtcToken({ channel: channelName, uid, role: "publisher" });
+  // await client.join(APP_ID, channelName, joinToken, uid);
+  const { token: joinToken, uid } = await fetchRtcToken({ channel: channelName, role: "publisher" });
   await client.join(APP_ID, channelName, joinToken, uid);
 
   if (isAudioMode){
