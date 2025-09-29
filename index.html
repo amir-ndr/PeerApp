@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>PeerApp — Call</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="main.css" />
+</head>
+<body>
+  <!-- Video mode: dynamic grid -->
+  <main id="video-root">
+    <div id="video-grid" aria-label="Participants video grid"></div>
+
+    <div id="controls" role="toolbar" aria-label="Call controls">
+      <div class="control-container" id="camera-btn" title="Toggle camera" aria-pressed="true" role="button" tabindex="0">
+        <img src="icons/camera.png" alt="Camera" />
+      </div>
+      <div class="control-container" id="mic-btn" title="Toggle mic" aria-pressed="true" role="button" tabindex="0">
+        <img src="icons/mic.png" alt="Mic" />
+      </div>
+
+      <!-- Safer leave: programmatic, so we can close tracks first -->
+      <div class="control-container danger" id="leave-btn" title="Leave" role="button" tabindex="0">
+        <img src="icons/phone.png" alt="Leave" />
+      </div>
+    </div>
+  </main>
+
+  <!-- Audio Call UI (only when mode=audio) -->
+  <div id="audio-call" hidden>
+    <div id="audio-stage">
+      <!-- Dynamic audio tiles get injected here -->
+      <div id="audio-list" class="audio-grid" aria-label="Participants list"></div>
+    </div>
+
+    <div id="call-meta">
+      <div id="call-title">Audio call</div>
+      <div id="call-timer">00:00</div>
+    </div>
+
+    <div id="audio-controls">
+      <button id="audio-mic" class="pill" type="button" aria-pressed="true" title="Toggle mic (currently ON)">
+        <img src="icons/mic.png" alt="Mic" />
+        <span id="audio-mic-text">Mute</span>
+      </button>
+
+      <button id="audio-leave" class="pill danger" type="button" title="Hang up">
+        <img src="icons/phone.png" alt="Hang up" />
+        <span>Leave</span>
+      </button>
+    </div>
+
+    <!-- Hidden audio tags (audio mode) -->
+    <audio id="local-audio" autoplay muted></audio>
+    <audio id="remote-audio" autoplay></audio>
+  </div>
+
+  <!-- Agora RTC SDK -->
+  <script src="AgoraRTC_N-4.24.0.js"></script>
+  <script src="main.js"></script>
+</body>
+</html>

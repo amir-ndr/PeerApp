@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>PeerApp — Room Chat</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="chat.css" />
+</head>
+<body>
+  <main id="chat-container">
+    <header id="topbar">
+      <a href="lobby.html" id="back">← Lobby</a>
+      <div id="room-info">
+        <h1>Room Chat</h1>
+        <div id="room-id">(loading…)</div>
+      </div>
+      <div id="status">
+        <span id="conn-dot" class="dot offline"></span>
+        <span id="conn-text">Offline</span>
+      </div>
+    </header>
+
+    <section id="messages" aria-live="polite" aria-label="Messages"></section>
+
+    <form id="composer" autocomplete="off">
+      <input id="msg" type="text" placeholder="Type a message…" required />
+      <button id="send" type="submit" title="Send">Send</button>
+    </form>
+  </main>
+
+  <!-- Agora RTM SDK (UMD) -->
+  <script src="agora-rtm-sdk-1.4.4.js"></script>
+  <script src="chat.js"></script>
+</body>
+</html>

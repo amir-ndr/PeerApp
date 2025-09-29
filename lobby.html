@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>PeerChat — Lobby</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="lobby.css" />
+</head>
+<body>
+  <main id="lobby">
+    <section id="card" role="dialog" aria-labelledby="title" aria-describedby="subtitle">
+      <header id="header">
+        <div id="brand">
+          <div id="logo">💬</div>
+          <div>
+            <h1 id="title">PeerApp</h1>
+            <p id="subtitle">Create or join a room</p>
+          </div>
+        </div>
+      </header>
+
+      <form id="join-form" novalidate>
+        <label for="room_code" class="sr-only">Room code</label>
+        <input
+          id="room_code"
+          name="room_code"
+          type="text"
+          placeholder="Enter room code"
+          autocomplete="off"
+          required
+          aria-required="true"
+        />
+
+        <label for="display_name" class="sr-only">Your name</label>
+        <input
+          id="display_name"
+          name="display_name"
+          type="text"
+          placeholder="Your name"
+          autocomplete="off"
+          required
+          aria-required="true"
+          style="margin-top:12px"
+        />
+
+        <div id="actions" role="group" aria-label="Choose what to start">
+          <button type="button" id="go-chat" class="btn outline">
+            <span class="btn-emoji">💬</span> Chat
+          </button>
+          <button type="button" id="go-video" class="btn primary">
+            <span class="btn-emoji">🎥</span> Video Call
+          </button>
+          <button type="button" id="go-audio" class="btn">
+            <span class="btn-emoji">🎙️</span> Audio Call
+          </button>
+        </div>
+
+        <p id="hint">Tip: share the same room code with a friend to join together.</p>
+        <p id="error" role="alert" aria-live="polite" hidden>Please enter a room code and your name.</p>
+      </form>
+    </section>
+  </main>
+
+  <script>
+    const input = document.getElementById('room_code');
+    const nameInput = document.getElementById('display_name');
+    const errorEl = document.getElementById('error');
+
+    function nav(urlPattern) {
+      const code = (input.value || '').trim();
+      const name = (nameInput.value || '').trim();
+      if (!code || !name) {
+        errorEl.hidden = false;
+        (!code ? input : nameInput).focus();
+        return;
+      }
+      errorEl.hidden = true;
+      const url = urlPattern
+        .replace('{code}', encodeURIComponent(code))
+        + `&name=${encodeURIComponent(name)}`;
+      window.location = url;
+    }
+
+    document.getElementById('go-chat').addEventListener('click', () => {
+      nav('chat.html?room={code}');
+    });
+    document.getElementById('go-video').addEventListener('click', () => {
+      nav('index.html?room={code}&mode=video');
+    });
+    document.getElementById('go-audio').addEventListener('click', () => {
+      nav('index.html?room={code}&mode=audio');
+    });
+
+    // Submit on Enter to default to Video Call
+    document.getElementById('join-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      nav('index.html?room={code}&mode=video');
+    });
+  </script>
+</body>
+</html>
