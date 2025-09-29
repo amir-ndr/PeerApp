@@ -1,7 +1,11 @@
+// main.js — Secure multi-user audio/video with Agora RTC, Vercel tokens, mobile fixes
+
 /* ====== CONFIG ====== */
 const APP_ID = "6774bd10adcd4974ae9d320147124bc5";
-const TOKEN_API_BASE = "https://peerapp-token-server.vercel.app/api";
-// If you protected the token route with ROOM_PASSWORD, set it here or leave null
+
+// CHANGE THIS to your Vercel token function (or "/api" if token lives in same project)
+const TOKEN_API_BASE = "https://peer-app-gold.vercel.app/api";
+// If you protected /api/token with a shared pass, set it here, else leave null
 const ROOM_PASSWORD = null;
 
 /* ====== URL params & mode ====== */
@@ -17,12 +21,12 @@ const isAudioMode = mode === "audio";
 /* ====== Names & UIDs ====== */
 function makeGuestId(){ return `Guest-${Math.random().toString(36).slice(2, 6)}`; }
 const displayName = providedName || makeGuestId();
-// Use the name as the Agora RTC UID (string uid supported)
+// Use the name as the Agora RTC UID (string)
 const uid = displayName;
 
 /* ====== DOM refs ====== */
 const audioUI       = document.getElementById("audio-call");
-const audioList     = document.getElementById("audio-list");
+const audioList     = document.getElementById("audio-list"); // optional custom list; may be null
 const audioMicBtn   = document.getElementById("audio-mic");
 const audioMicText  = document.getElementById("audio-mic-text");
 const audioLeaveBtn = document.getElementById("audio-leave");
@@ -32,21 +36,28 @@ const camBtn = document.getElementById("camera-btn");
 const micBtn = document.getElementById("mic-btn");
 const leaveBtn = document.getElementById("leave-btn");
 
+// Fallback labels if you use the simple 2-avatar audio UI
+const localLabelEl  = document.getElementById("local-label");
+const remoteLabelEl = document.getElementById("remote-label");
+
 /* ====== RTC state ====== */
 let client;
 let localTracks = { audio: null, video: null };
 const remoteUsers = new Map(); // uid -> user
 const tiles = new Map();       // video tiles
-const audioTiles = new Map();  // audio tiles
+const audioTiles = new Map();  // audio tiles if #audio-list exists
 let timerInt = null;
 
-/* ====== Token fetch/renew helpers ====== */
+/* ====== Browser quirks ====== */
+const ua = navigator.userAgent.toLowerCase();
+const isSafari = ua.includes("safari") && !ua.includes("chrome") && !ua.includes("android");
+
+/* ====== Token fetch/renew ====== */
 async function fetchRtcToken({ channel, uid, role = "publisher" }){
   const url = new URL("token", TOKEN_API_BASE);
   url.searchParams.set("channel", channel);
   url.searchParams.set("uid", uid);
   url.searchParams.set("role", role);
-
   const headers = {};
   if (ROOM_PASSWORD) headers["x-room-password"] = ROOM_PASSWORD;
 
@@ -60,6 +71,51 @@ async function fetchRtcToken({ channel, uid, role = "publisher" }){
   return data.token;
 }
 
+/* ====== Mobile: unlock audio & wakelock ====== */
+let audioUnlockShown = false;
+function showAudioUnlockOverlay(tryPlayAgain) {
+  if (audioUnlockShown) return;
+  audioUnlockShown = true;
+
+  const overlay = document.createElement("div");
+  overlay.style.cssText = `
+    position:fixed; inset:0; display:grid; place-items:center;
+    background:rgba(0,0,0,.6); z-index:9999; color:#fff; font-weight:700;
+  `;
+  overlay.innerHTML = `
+    <button id="unlock-audio" style="
+      padding:12px 18px; border-radius:999px; border:1px solid #999;
+      background:#1d212a; color:#fff; font-size:16px;">Tap to enable audio</button>
+  `;
+  document.body.appendChild(overlay);
+
+  overlay.querySelector("#unlock-audio").addEventListener("click", async () => {
+    try { await tryPlayAgain(); } finally { overlay.remove(); }
+  }, { once: true });
+}
+
+async function replayRemoteAudioTracks() {
+  for (const [, user] of remoteUsers) {
+    if (user.audioTrack) {
+      try { user.audioTrack.play(); } catch {}
+    }
+  }
+}
+
+let wakeLock = null;
+async function requestWakeLock(){
+  try {
+    if ('wakeLock' in navigator) {
+      wakeLock = await navigator.wakeLock.request('screen');
+      document.addEventListener('visibilitychange', async () => {
+        if (document.visibilityState === 'visible') {
+          try { wakeLock = await navigator.wakeLock.request('screen'); } catch {}
+        }
+      });
+    }
+  } catch {}
+}
+
 /* ====== Timer ====== */
 function startTimer(){
   const el = document.getElementById("call-timer");
@@ -71,7 +127,7 @@ function startTimer(){
   }, 1000);
 }
 
-/* ====== Video tile helpers ====== */
+/* ====== Video tiles ====== */
 function makeTile(id, labelText){
   const tile = document.createElement("div");
   tile.className = "tile";
@@ -105,7 +161,7 @@ function removeTile(id){
   tiles.delete(id);
 }
 
-/* ====== Audio tile helpers ====== */
+/* ====== Audio tiles (optional list) ====== */
 function makeAudioTile(id, labelText, isLocal=false){
   const root = document.createElement('div');
   root.className = `a-tile${isLocal ? ' local' : ''}`;
@@ -132,6 +188,7 @@ function makeAudioTile(id, labelText, isLocal=false){
   return root;
 }
 function ensureAudioTile(uidKey, label){
+  if (!audioList) return null; // if your HTML doesn't have #audio-list, skip tiles
   if (audioTiles.has(uidKey)) return audioTiles.get(uidKey).root;
   return makeAudioTile(uidKey, label, uidKey === 'local');
 }
@@ -151,6 +208,12 @@ function setAudioTileSpeaking(uidKey, speaking){
   const t = audioTiles.get(uidKey);
   if (!t) return;
   t.root.classList.toggle('speaking', !!speaking);
+}
+
+/* ====== Fallback: 2-avatar audio UI labels ====== */
+function setSimpleAudioLabels(remoteName){
+  if (localLabelEl)  localLabelEl.textContent  = displayName;
+  if (remoteLabelEl) remoteLabelEl.textContent = remoteName || "Remote";
 }
 
 /* ====== Controls ====== */
@@ -207,16 +270,15 @@ async function init(){
     if (title) title.textContent = `Audio call — ${displayName}`;
   }
 
-  client = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
+  // Safari tends to prefer h264 for better HW decode
+  client = AgoraRTC.createClient({ mode: "rtc", codec: isSafari ? "h264" : "vp8" });
 
   // Token renew handlers
   client.on("token-privilege-will-expire", async () => {
     try {
       const newToken = await fetchRtcToken({ channel: channelName, uid, role: "publisher" });
       await client.renewToken(newToken);
-    } catch (e) {
-      console.error("[token] renew failed:", e);
-    }
+    } catch (e) { console.error("[token] renew failed:", e); }
   });
   client.on("token-privilege-did-expire", async () => {
     try {
@@ -236,13 +298,20 @@ async function init(){
 
     if (mediaType === "video"){
       ensureRemoteTile(user.uid);
-      user.videoTrack.play(`player-${user.uid}`);
+      try { user.videoTrack.play(`player-${user.uid}`); } catch {}
     }
     if (mediaType === "audio"){
-      user.audioTrack.play();
+      try { user.audioTrack.play(); }
+      catch { showAudioUnlockOverlay(replayRemoteAudioTracks); }
+
+      // Audio UI: either rich list (if #audio-list exists) or simple labels
       if (isAudioMode){
-        ensureAudioTile(user.uid, String(user.uid));
-        setAudioTileMuted(user.uid, false);
+        if (audioList) {
+          ensureAudioTile(user.uid, String(user.uid));
+          setAudioTileMuted(user.uid, false);
+        } else {
+          setSimpleAudioLabels(String(user.uid));
+        }
       }
     }
   });
@@ -259,7 +328,10 @@ async function init(){
   client.on("user-left", (user) => {
     remoteUsers.delete(user.uid);
     removeTile(user.uid);
-    if (isAudioMode) removeAudioTile(user.uid);
+    if (isAudioMode) {
+      if (audioList) removeAudioTile(user.uid);
+      else setSimpleAudioLabels(null);
+    }
   });
 
   // ===== Join with secure short-lived token =====
@@ -276,8 +348,12 @@ async function init(){
     }
     await client.publish([localTracks.audio]);
 
-    ensureAudioTile('local', displayName);
-    setAudioTileMuted('local', false);
+    if (audioList) {
+      ensureAudioTile('local', displayName);
+      setAudioTileMuted('local', false);
+    } else {
+      setSimpleAudioLabels(null); // set local name; remote remains "Remote" until someone joins
+    }
 
     if (client.enableAudioVolumeIndicator) client.enableAudioVolumeIndicator();
     client.on('volume-indicator', (volumes) => {
@@ -291,6 +367,11 @@ async function init(){
     });
 
     startTimer();
+    requestWakeLock();
+
+    // Try to start any already-subscribed remote audio; fix autoplay on iOS if blocked
+    try { await replayRemoteAudioTracks(); } catch { showAudioUnlockOverlay(replayRemoteAudioTracks); }
+
   } else {
     let mic, cam;
     try{
@@ -309,6 +390,8 @@ async function init(){
     ensureLocalTile();
     cam.play(`player-local`);
     await client.publish([mic, cam]);
+
+    requestWakeLock();
   }
 
   /* Wire controls */
