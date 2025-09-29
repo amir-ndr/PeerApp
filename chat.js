@@ -1,8 +1,11 @@
-// chat.js — PeerChat (Agora RTM channel chat with name + avatar)
+// chat.js — PeerChat (Agora RTM channel chat with name + avatar), with Vercel RTM tokens
 
 // ---------- Config ----------
 const APP_ID = "6774bd10adcd4974ae9d320147124bc5";
-let token = null; // if certificates are ON, replace with a valid RTM token
+// If your token function lives in the same Vercel project as the frontend, keep "/api"
+const TOKEN_API_BASE = "/api";
+// Optional shared password (if you set ROOM_PASSWORD in the function). We pass via query to avoid CORS preflight.
+const ROOM_PASSWORD = null;
 
 // ---------- Elements ----------
 const $messages = document.getElementById("messages");
@@ -15,20 +18,20 @@ const $connText = document.getElementById("conn-text");
 // ---------- Params ----------
 const params = new URLSearchParams(window.location.search);
 const roomId = (params.get("room") || "").trim();
-const displayName = (params.get("name") || "Guest").trim();
+const displayNameParam = (params.get("name") || "").trim();
+const displayName = displayNameParam || `Guest-${Math.random().toString(36).slice(2,6)}`;
+const uid = displayName; // use same string ID as your call app
 
 if (!roomId) {
   alert("Missing room code. Redirecting to lobby.");
   window.location = "lobby.html";
 }
-
 $roomIdEl.textContent = `${roomId} — ${displayName}`;
 
 // Channel name is separate from call channels
 const channelName = `chat_${roomId}`;
 
 // ---------- State ----------
-const uid = String(Math.floor(Math.random() * 10000));
 let client = null;
 let channel = null;
 let joined = false;
@@ -48,6 +51,28 @@ function hashColor(s) {
 }
 const myAvatar = { name: displayName, init: initials(displayName), color: hashColor(displayName) };
 
+// ---------- Token helpers ----------
+function tokenUrl(path){
+  const base = TOKEN_API_BASE.replace(/\/$/, "");
+  const p = String(path || "").replace(/^\//, "");
+  return `${base}/${p}`;
+}
+
+async function fetchRtmToken({ uid }){
+  const qs = new URLSearchParams({ type: "rtm", uid });
+  if (ROOM_PASSWORD) qs.set("pw", ROOM_PASSWORD);
+  const url = `${tokenUrl("token")}?${qs.toString()}`;
+
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) {
+    const msg = await res.text().catch(()=>res.statusText);
+    throw new Error(`RTM token HTTP ${res.status} ${msg}`);
+  }
+  const data = await res.json();
+  if (!data?.token) throw new Error("No RTM token returned");
+  return data.token;
+}
+
 // Prevent double init (hot reloads)
 if (window.__chatInit) {
   console.warn("Chat already initialized; skipping.");
@@ -66,18 +91,15 @@ function el(tag, className, text) {
 
 function appendMessage({ who, name, avatarInit, avatarColor, text }) {
   const wrap = el("div", `msg ${who}`);
-
   const head = el("div", "msg-head");
   const av = el("span", "msg-avatar", avatarInit || "👤");
   if (avatarColor) av.style.background = avatarColor;
   const nm = el("span", "msg-name", name || "Anonymous");
   head.appendChild(av);
   head.appendChild(nm);
-
   const body = el("div", "msg-body", text || "");
   wrap.appendChild(head);
   wrap.appendChild(body);
-
   $messages.appendChild(wrap);
   $messages.scrollTop = $messages.scrollHeight;
 }
@@ -103,9 +125,9 @@ async function init() {
   try {
     console.log("[chat] start", { roomId, channelName, uid, displayName });
 
-    // SDK presence check (defensive)
+    // RTM SDK presence check
     if (!window.AgoraRTM || typeof AgoraRTM.createInstance !== "function") {
-      alert("Agora RTM SDK not loaded. Check <script> tag.");
+      alert("Agora RTM SDK not loaded. Check <script> tag for AgoraRTM.");
       return (window.location = "lobby.html");
     }
 
@@ -119,7 +141,24 @@ async function init() {
       else setStatus("offline");
     });
 
-    await client.login({ uid, token });
+    // Token lifecycle (auto-renew)
+    const renew = async () => {
+      try {
+        const t = await fetchRtmToken({ uid });
+        await client.renewToken(t);
+        console.log("[chat] RTM token renewed");
+      } catch (e) {
+        console.error("[chat] RTM token renew failed:", e);
+      }
+    };
+    // Older RTM SDKs fire only TokenExpired; newer add TokenPrivilegeWillExpire
+    client.on("TokenExpired", renew);
+    if (client.onTokenPrivilegeWillExpire) client.on("TokenPrivilegeWillExpire", renew);
+
+    // Login with RTM token
+    const rtmToken = await fetchRtmToken({ uid });
+    if (!rtmToken || rtmToken.length < 10) throw new Error("Invalid RTM token");
+    await client.login({ uid, token: rtmToken });
 
     channel = client.createChannel(channelName);
     await channel.join();
@@ -135,11 +174,12 @@ async function init() {
         payload = { text: message?.text || "" };
       }
       const isMe = memberId === uid || payload.from === uid;
+      const name = payload.name || memberId;
       appendMessage({
         who: isMe ? "me" : "them",
-        name: payload.name || memberId,
-        avatarInit: payload.avatarInit || initials(payload.name || memberId),
-        avatarColor: payload.avatarColor || hashColor(payload.name || memberId),
+        name,
+        avatarInit: payload.avatarInit || initials(name),
+        avatarColor: payload.avatarColor || hashColor(name),
         text: payload.text || ""
       });
     });
@@ -200,7 +240,6 @@ async function onSend(e) {
   } catch (err) {
     console.error("[chat] send failed", err);
     appendSystem("⚠️ Message failed to send. Retrying…");
-    // simple retry once
     try {
       await channel.sendMessage({ text: JSON.stringify(payload) });
       appendSystem("✅ Delivered on retry");
