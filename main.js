@@ -495,7 +495,7 @@ async function init(){
 (async () => {
   try { await init(); }
   catch (e) {
-    await new Promise(r => setTimeout(r, 200));
+    await new Promise(r => setTimeout(r, 600));
     try { await init(); }
     catch { window.location.replace("lobby.html"); }
   }
