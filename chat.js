@@ -18,22 +18,30 @@ const params = new URLSearchParams(window.location.search);
 const rawRoom = (params.get("room") || "").trim();
 const rawName = (params.get("name") || "").trim();
 
-function cleanName(s){ return (s || '').replace(/[^\p{L}\p{N}\s._-]/gu, '').slice(0, 30); }
-function cleanRoom(s){
-  const t = (s || '').replace(/[^A-Za-z0-9._-]/g, '');
-  return t && t.length >= 3 && t.length <= 64 ? t : "";
+// Allow Unicode letters/numbers plus . _ - and spaces; collapse spaces to dashes
+function cleanRoom(s) {
+  const t = (s || "")
+    .replace(/[^\p{L}\p{N}._\-\s]/gu, "")  // keep letters/numbers/._- and spaces
+    .trim()
+    .replace(/\s+/g, "-");                 // turn spaces into hyphens
+  // Require at least 1 char and max 64
+  return t && t.length <= 64 ? t : "";
+}
+
+// UI name: allow Unicode letters/numbers/space/._- and cap length
+function cleanName(s) {
+  return (s || "").replace(/[^\p{L}\p{N}\s._-]/gu, "").slice(0, 30) || "";
 }
 
 const roomId = cleanRoom(rawRoom);
 const displayName = cleanName(rawName) || `Guest-${Math.random().toString(36).slice(2,6)}`;
 
 if (!roomId) {
+  console.warn("Invalid room param:", rawRoom);  // helpful for debugging
   alert("Missing or invalid room code. Redirecting to lobby.");
   window.location = "lobby.html";
 }
-$roomIdEl.textContent = `${roomId} — ${displayName}`;
 
-const channelName = `chat_${roomId}`;
 
 // ---------- State ----------
 let client = null;
