@@ -208,3 +208,27 @@ body.audio-mode #controls #camera-btn{ display:none !important; }
 .a-tile.local{
   border-color: rgba(139,92,246,.33);
 }
+
+
+/* Respect iPhone notches / home indicators */
+:root {
+  --safe-top: env(safe-area-inset-top);
+  --safe-bottom: env(safe-area-inset-bottom);
+  --safe-left: env(safe-area-inset-left);
+  --safe-right: env(safe-area-inset-right);
+}
+body {
+  padding-top: var(--safe-top);
+  padding-bottom: var(--safe-bottom);
+  padding-left: var(--safe-left);
+  padding-right: var(--safe-right);
+}
+
+/* Prevent iOS zooming on tap */
+input, button, select, textarea { font-size: 16px; }
+
+/* Make touch targets finger-friendly */
+.control-container, .pill {
+  min-height: 44px;
+  min-width: 44px;
+}

@@ -400,7 +400,9 @@ async function init(){
 
   if (isAudioMode){
     try{
-      localTracks.audio = await AgoraRTC.createMicrophoneAudioTrack();
+      localTracks.audio = await AgoraRTC.createMicrophoneAudioTrack({
+        AEC: true, ANS: true, AGC: true    // (echo cancel, noise suppress, auto gain)
+      });
       micOn = true;
       updateMicUI(true);
     }catch(e){

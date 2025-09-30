@@ -1,20 +1,21 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+  <meta charset="utf-8" />
+  <title>PeerApp — Call</title>
+
+  <!-- Viewport: safe area + no auto zoom on inputs -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+
+  <!-- PWA -->
   <link rel="manifest" href="/manifest.webmanifest">
   <meta name="theme-color" content="#0b0f19">
 
-  <!-- iOS PWA tweaks -->
+  <!-- iOS PWA full-screen & status bar -->
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <link rel="apple-touch-icon" href="/icons/pwa-192.png">
 
-  <!-- Prevent zoom on buttons/inputs that might block mic prompts -->
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-
-  <meta charset="utf-8" />
-  <title>PeerApp — Call</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <link rel="stylesheet" href="main.css" />
 </head>
 <body>
@@ -29,8 +30,6 @@
       <div class="control-container" id="mic-btn" title="Toggle mic" aria-pressed="true" role="button" tabindex="0">
         <img src="icons/mic.png" alt="Mic" />
       </div>
-
-      <!-- Safer leave: programmatic, so we can close tracks first -->
       <div class="control-container danger" id="leave-btn" title="Leave" role="button" tabindex="0">
         <img src="icons/phone.png" alt="Leave" />
       </div>
@@ -40,7 +39,6 @@
   <!-- Audio Call UI (only when mode=audio) -->
   <div id="audio-call" hidden>
     <div id="audio-stage">
-      <!-- Dynamic audio tiles get injected here -->
       <div id="audio-list" class="audio-grid" aria-label="Participants list"></div>
     </div>
 
@@ -61,20 +59,21 @@
       </button>
     </div>
 
-    <!-- Hidden audio tags (audio mode) -->
-    <audio id="local-audio" autoplay muted></audio>
-    <audio id="remote-audio" autoplay></audio>
+    <!-- If you ever use tags directly, keep playsinline/autoplay -->
+    <audio id="local-audio" autoplay muted playsinline></audio>
+    <audio id="remote-audio" autoplay playsinline></audio>
   </div>
 
   <!-- Agora RTC SDK -->
   <script src="AgoraRTC_N-4.24.0.js"></script>
+
+  <!-- Register PWA service worker (safe no-op on desktop) -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch(console.error);
+    }
+  </script>
+
   <script src="main.js"></script>
 </body>
 </html>
-
-<script>
-  if ("serviceWorker" in navigator) {
-    navigator.serviceWorker.register("/sw.js").catch(console.error);
-  }
-  </script>
-  
