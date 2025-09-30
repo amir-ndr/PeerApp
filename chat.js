@@ -1,11 +1,12 @@
-// chat.js — Secure PeerChat (Agora RTM channel chat) — FIXED Unicode room + POST tokens
+// chat.js — Secure PeerChat (Agora RTM channel chat)
 
 // ---------- Config ----------
+const isFileLike = location.protocol === 'capacitor:' || location.protocol === 'file:';
 const APP_ID = "6774bd10adcd4974ae9d320147124bc5";
 const TOKEN_API_BASE = isFileLike
-  ? 'https://peer-app-git-main-amirndrs-projects.vercel.app/api'   // 👈 your deployed site’s /api
-  : '/api';
-const ROOM_PASSWORD = null;      // if set on server, passed via header below
+  ? 'https://peer-app-git-main-amirndrs-projects.vercel.app/api' // full origin when running from file:// / Capacitor
+  : '/api';                                                      // same-origin in normal deploy
+const ROOM_PASSWORD = null; // if set on server, passed via header below
 
 // ---------- Elements (guard each so missing nodes don't crash) ----------
 const $messages = document.getElementById("messages");
@@ -22,15 +23,12 @@ const rawName = (params.get("name") || "").trim();
 
 // Allow Unicode letters/numbers + . _ - and spaces; collapse spaces to "-"
 function cleanRoom(s) {
-  // Keep letters, numbers, dot, underscore, hyphen, spaces
   const t = (s || "")
     .replace(/[^\p{L}\p{N}._\-\s]/gu, "")
     .trim()
-    .replace(/\s+/g, "-"); // spaces -> hyphen
-  // Require 1..64 chars
+    .replace(/\s+/g, "-");
   return t && t.length <= 64 ? t : "";
 }
-
 // UI name: allow Unicode letters/numbers/space/._- and cap length
 function cleanName(s) {
   return (s || "").replace(/[^\p{L}\p{N}\s._-]/gu, "").slice(0, 30) || "";
@@ -41,19 +39,11 @@ const displayName = cleanName(rawName) || `Guest-${Math.random().toString(36).sl
 
 if (!roomId) {
   console.warn("[chat] Invalid room param:", rawRoom);
-  // Don’t hard redirect; show a friendly tip:
   if ($roomIdEl) $roomIdEl.textContent = "Invalid room code";
-  alert("Missing or invalid room code in URL. Example:\n/chat.html?room=شهسوار-123&name=Amir");
-  // If you prefer redirect, uncomment:
-  // window.location = "lobby.html";
+  alert("Missing or invalid room code in URL. Example:\n/chat.html?room=room-1&name=Amir");
 }
 
-// Channel name (separate namespace from RTC call)
-// NOTE: Agora RTM allows Unicode for channel IDs; this is a client-side name.
-// If your server validates channels, ensure it matches your server rule as well.
 const channelName = roomId ? `chat_${roomId}` : "";
-
-// Reflect room/name in UI if possible
 if ($roomIdEl && roomId) $roomIdEl.textContent = `${roomId} — ${displayName}`;
 
 // ---------- State ----------
@@ -91,9 +81,13 @@ async function fetchRtmToken() {
       ...(ROOM_PASSWORD ? { "x-room-password": ROOM_PASSWORD } : {})
     },
     cache: "no-store",
-    body: JSON.stringify({ type: "rtm", channel: channelName, name: displayName }) // name is UI-only (optional)
+    body: JSON.stringify({ type: "rtm", channel: channelName, name: displayName })
   });
-  if (!res.ok) throw new Error(`RTM token HTTP ${res.status}`);
+  if (!res.ok) {
+    const txt = await res.text().catch(()=>res.statusText);
+    console.error("[chat] RTM token HTTP", res.status, txt);
+    throw new Error(`RTM token HTTP ${res.status}`);
+  }
   const data = await res.json(); // { token, account, expiresIn }
   if (!data?.token || !data?.account) throw new Error("Bad RTM token payload");
   return data;
@@ -150,13 +144,16 @@ function setStatus(state) {
 // ---------- Core ----------
 async function init() {
   try {
-    if (!roomId) return; // handled above
+    if (!channelName) return; // handled above
+
+    // 1) Make sure RTM SDK is on the page
     if (!window.AgoraRTM || typeof AgoraRTM.createInstance !== "function") {
+      console.error("[chat] Agora RTM SDK not loaded (missing <script src='AgoraRTM_*.js'>)");
       alert("Agora RTM SDK not loaded. Check the <script> tag for AgoraRTM.");
-      // window.location = "lobby.html"; // optional
       return;
     }
 
+    // 2) Create client
     client = await AgoraRTM.createInstance(APP_ID);
 
     client.on("ConnectionStateChanged", (newState, reason) => {
@@ -165,7 +162,19 @@ async function init() {
                 newState === "RECONNECTING" ? "reconnecting" : "offline");
     });
 
-    // Token lifecycle (renew on expiry/will-expire)
+    // 3) Login with RTM token
+    const { token, account } = await fetchRtmToken();
+    rtmAccount = account;
+    await client.login({ uid: rtmAccount, token });
+
+    // 4) Join channel
+    channel = client.createChannel(channelName);
+    await channel.join();
+    joined = true;
+    setStatus("online");
+    appendSystem(`Joined chat room: ${channelName}`);
+
+    // 5) Renew token automatically
     const renew = async () => {
       try {
         const t = await fetchRtmToken();
@@ -179,17 +188,7 @@ async function init() {
     client.on("TokenExpired", renew);
     if (client.onTokenPrivilegeWillExpire) client.on("TokenPrivilegeWillExpire", renew);
 
-    // Login
-    const { token, account } = await fetchRtmToken();
-    rtmAccount = account;
-    await client.login({ uid: rtmAccount, token });
-
-    channel = client.createChannel(channelName);
-    await channel.join();
-    joined = true;
-    setStatus("online");
-
-    // Channel events
+    // 6) Events
     channel.on("ChannelMessage", (message, memberId) => {
       let payload = {};
       try { payload = JSON.parse(message?.text || "{}"); }
@@ -208,17 +207,15 @@ async function init() {
     channel.on("MemberJoined",  (memberId) => appendSystem(`🟢 ${memberId} joined`));
     channel.on("MemberLeft",    (memberId) => appendSystem(`🔴 ${memberId} left`));
 
-    // Send handler
+    // 7) Send handler
     if ($composer) $composer.addEventListener("submit", onSend);
 
-    // Clean up
+    // 8) Clean up
     window.addEventListener("beforeunload", cleanup);
 
-    appendSystem(`Joined chat room: ${channelName}`);
   } catch (err) {
     console.error("[chat] init failed:", err);
-    alert(`Failed to join chat (${err.message || err}). Check your room in the URL.`);
-    // window.location = "lobby.html"; // optional
+    alert(`Failed to join chat (${err.message || err}). Check your room in the URL and token API.`);
   }
 }
 
@@ -226,32 +223,22 @@ async function onSend(e) {
   e.preventDefault();
   const text = ($input?.value || "").trim();
   if (!text) return;
-
   if (!joined || !channel) {
     appendSystem("⚠️ Not connected yet. Please wait…");
     return;
   }
 
   const payload = {
-    from: rtmAccount,           // server-assigned identity
-    name: displayName,          // UI-only display name
+    from: rtmAccount,
+    name: displayName,
     avatarInit: myAvatar.init,
     avatarColor: myAvatar.color,
     text
   };
 
   try {
-    // Optimistic UI
-    appendMessage({
-      who: "me",
-      name: payload.name,
-      avatarInit: payload.avatarInit,
-      avatarColor: payload.avatarColor,
-      text: payload.text
-    });
+    appendMessage({ who: "me", name: payload.name, avatarInit: payload.avatarInit, avatarColor: payload.avatarColor, text: payload.text });
     if ($input) $input.value = "";
-
-    // Send to channel as JSON
     await channel.sendMessage({ text: JSON.stringify(payload) });
   } catch (err) {
     console.error("[chat] send failed:", err);
