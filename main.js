@@ -337,20 +337,26 @@ async function init(){
   // Token renew handlers
   client.on("token-privilege-will-expire", async () => {
     try {
-      const newToken = await fetchRtcToken({ channel: channelName, uid, role: "publisher" });
-      await client.renewToken(newToken);
-    } catch (e) { console.error("[token] renew failed:", e); }
+      const { token } = await fetchRtcToken({ channel: channelName });
+      await client.renewToken(token);  // <-- pass string
+      console.log("[rtc] token renewed before expiry");
+    } catch (e) {
+      console.error("[rtc] token renew failed (will-expire):", e);
+    }
   });
+  
   client.on("token-privilege-did-expire", async () => {
     try {
-      const newToken = await fetchRtcToken({ channel: channelName, uid, role: "publisher" });
-      await client.renewToken(newToken);
+      const { token } = await fetchRtcToken({ channel: channelName });
+      await client.renewToken(token);  // <-- pass string
+      console.log("[rtc] token renewed after expiry");
     } catch (e) {
-      console.error("[token] renew after expiry failed:", e);
+      console.error("[rtc] token renew failed (did-expire):", e);
       alert("Your session expired. Please rejoin.");
       window.location = "lobby.html";
     }
   });
+   
 
   // Remote events
   client.on("user-published", async (user, mediaType) => {
@@ -395,8 +401,8 @@ async function init(){
   });
 
   // ===== Fetch token & join =====
-  const { token: joinToken, uid } = await fetchRtcToken({ channel: channelName });
-  await client.join(APP_ID, channelName, joinToken, uid);
+  const { token: joinToken, uid: serverUid } = await fetchRtcToken({ channel: channelName });
+  await client.join(APP_ID, channelName, joinToken, serverUid);
 
   if (isAudioMode){
     try{

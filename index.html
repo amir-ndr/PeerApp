@@ -70,7 +70,7 @@
   <!-- Register PWA service worker (safe no-op on desktop) -->
   <script>
     if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('./sw.js').catch(console.error);
+      navigator.serviceWorker.register('/sw.js').catch(console.error);
     }
   </script>
 
