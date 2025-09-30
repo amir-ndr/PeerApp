@@ -61,7 +61,14 @@ function tokenUrl(path){
 }
 
 /* ====== Token fetch/renew ====== */
-async function fetchRtcToken({ channel }){
+// Replace your old fetchRtcToken with this:
+function tokenUrl(path){
+  const base = TOKEN_API_BASE.replace(/\/$/, "");
+  const p = String(path || "").replace(/^\//, "");
+  return `${base}/${p}`;
+}
+
+async function fetchRtcToken({ channel }) {
   const res = await fetch(tokenUrl("token"), {
     method: "POST",
     headers: {
@@ -69,10 +76,10 @@ async function fetchRtcToken({ channel }){
       ...(ROOM_PASSWORD ? { "x-room-password": ROOM_PASSWORD } : {})
     },
     cache: "no-store",
-    body: JSON.stringify({ channel })
+    body: JSON.stringify({ type: "rtc", channel })
   });
   if (!res.ok) throw new Error(`Token HTTP ${res.status}`);
-  const data = await res.json(); // { token, uid }
+  const data = await res.json(); // { token, uid, expiresIn }
   if (!data?.token || typeof data?.uid !== "number") throw new Error("Bad token payload");
   return data;
 }
@@ -388,8 +395,6 @@ async function init(){
   });
 
   // ===== Fetch token & join =====
-  // const joinToken = await fetchRtcToken({ channel: channelName, uid, role: "publisher" });
-  // await client.join(APP_ID, channelName, joinToken, uid);
   const { token: joinToken, uid } = await fetchRtcToken({ channel: channelName });
   await client.join(APP_ID, channelName, joinToken, uid);
 
