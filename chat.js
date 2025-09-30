@@ -2,7 +2,9 @@
 
 // ---------- Config ----------
 const APP_ID = "6774bd10adcd4974ae9d320147124bc5";
-const TOKEN_API_BASE = "/api";   // same-origin (Vercel functions)
+const TOKEN_API_BASE = isFileLike
+  ? 'https://peer-app-git-main-amirndrs-projects.vercel.app/api'   // 👈 your deployed site’s /api
+  : '/api';
 const ROOM_PASSWORD = null;      // if set on server, passed via header below
 
 // ---------- Elements (guard each so missing nodes don't crash) ----------
