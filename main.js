@@ -1,16 +1,13 @@
-// put this at the very top of main.js and use TOKEN_API_BASE below
+// ===== Top-level config =====
 const isFileLike = location.protocol === 'capacitor:' || location.protocol === 'file:';
 const TOKEN_API_BASE = isFileLike
-  ? 'https://peer-app-git-main-amirndrs-projects.vercel.app/api'   // 👈 your deployed site’s /api
+  ? 'https://peer-app-git-main-amirndrs-projects.vercel.app/api'
   : '/api';
 
 const APP_ID = "6774bd10adcd4974ae9d320147124bc5";
-// const TOKEN_API_BASE = "/api";
-// Optional: if you set ROOM_PASSWORD in the token function, put the same here.
-// We pass it via query string to AVOID CORS preflight.
-const ROOM_PASSWORD = null;
+const ROOM_PASSWORD = null; // if you protect /api/token with a shared pass
 
-/* ====== URL params & mode ====== */
+// ===== URL params & mode =====
 const params = new URLSearchParams(window.location.search);
 const roomId = (params.get("room") || "").trim();
 const rawMode = (params.get("mode") || "video").trim().toLowerCase();
@@ -20,13 +17,11 @@ if (!roomId) window.location = "lobby.html";
 const channelName = `call_${mode}_${roomId}`;
 const isAudioMode = mode === "audio";
 
-/* ====== Names & UIDs ====== */
+// ===== Names & UIDs =====
 function makeGuestId(){ return `Guest-${Math.random().toString(36).slice(2, 6)}`; }
-const displayName = providedName || makeGuestId();
-// Use the name as the Agora RTC UID (string)
-const uid = displayName;
+const displayName = providedName || makeGuestId(); // UI name only (not used for RTC uid)
 
-/* ====== DOM refs ====== */
+// ===== DOM refs =====
 const audioUI       = document.getElementById("audio-call");
 const audioList     = document.getElementById("audio-list");
 const audioMicBtn   = document.getElementById("audio-mic");
@@ -41,7 +36,7 @@ const leaveBtn = document.getElementById("leave-btn");
 const localLabelEl  = document.getElementById("local-label");
 const remoteLabelEl = document.getElementById("remote-label");
 
-/* ====== RTC state ====== */
+// ===== RTC state =====
 let client;
 let localTracks = { audio: null, video: null };
 const remoteUsers = new Map(); // uid -> user
@@ -49,25 +44,21 @@ const tiles = new Map();       // video tiles
 const audioTiles = new Map();  // audio tiles if #audio-list exists
 let timerInt = null;
 
-/* ====== Browser quirks ====== */
+// Proactive token renew timer
+let renewTimer = null;
+
+// ===== Browser quirks =====
 const ua = navigator.userAgent.toLowerCase();
 const isSafari = ua.includes("safari") && !ua.includes("chrome") && !ua.includes("android");
 
-/* ====== Helpers ====== */
+// ===== Helpers =====
 function tokenUrl(path){
   const base = TOKEN_API_BASE.replace(/\/$/, "");
   const p = String(path || "").replace(/^\//, "");
   return `${base}/${p}`;
 }
 
-/* ====== Token fetch/renew ====== */
-// Replace your old fetchRtcToken with this:
-function tokenUrl(path){
-  const base = TOKEN_API_BASE.replace(/\/$/, "");
-  const p = String(path || "").replace(/^\//, "");
-  return `${base}/${p}`;
-}
-
+// ===== Token fetch / renew =====
 async function fetchRtcToken({ channel }) {
   const res = await fetch(tokenUrl("token"), {
     method: "POST",
@@ -79,11 +70,29 @@ async function fetchRtcToken({ channel }) {
     body: JSON.stringify({ type: "rtc", channel })
   });
   if (!res.ok) throw new Error(`Token HTTP ${res.status}`);
-  const data = await res.json(); // { token, uid, expiresIn }
+  const data = await res.json(); // expected: { token, uid (number), expiresIn (seconds?) }
   if (!data?.token || typeof data?.uid !== "number") throw new Error("Bad token payload");
   return data;
 }
 
+function scheduleProactiveRenew(expiresInSeconds) {
+  clearTimeout(renewTimer);
+  if (!expiresInSeconds || !Number.isFinite(expiresInSeconds)) return;
+  // Renew ~60s early; clamp to at least 10s
+  const ms = Math.max(10_000, (expiresInSeconds - 60) * 1000);
+  renewTimer = setTimeout(async () => {
+    try {
+      const { token, expiresIn } = await fetchRtcToken({ channel: channelName });
+      await client.renewToken(token); // IMPORTANT: pass the string
+      console.log("[rtc] proactive token renewed");
+      // Reschedule if server tells us a fresh expiresIn
+      if (expiresIn) scheduleProactiveRenew(expiresIn);
+    } catch (e) {
+      console.error("[rtc] proactive renew failed:", e);
+      // fallback to SDK events; if those fail, user will see the expiry alert below
+    }
+  }, ms);
+}
 
 /* ====== Mobile: unlock audio & wakelock ====== */
 let audioUnlockShown = false;
@@ -231,7 +240,6 @@ function setSimpleAudioLabels(remoteName){
 }
 
 /* ====== Controls ====== */
-// keep these at top-level state
 let micOn = false;
 let camOn = false;
 
@@ -259,12 +267,12 @@ async function toggleMic(){
   const track = localTracks.audio;
   if (!track) { console.warn("mic not ready"); return; }
 
-  const next = !micOn;                 // desired ON state
+  const next = !micOn;
   try {
     if (typeof track.setMuted === 'function') {
-      await track.setMuted(!next);     // setMuted(true) => muted
+      await track.setMuted(!next);
     } else if (typeof track.setEnabled === 'function') {
-      await track.setEnabled(next);    // fallback
+      await track.setEnabled(next);
     }
     micOn = next;
     updateMicUI(micOn);
@@ -277,12 +285,12 @@ async function toggleCam(){
   const track = localTracks.video;
   if (isAudioMode || !track) { console.warn("cam not ready or audio mode"); return; }
 
-  const next = !camOn;                 // desired ON state
+  const next = !camOn;
   try {
     if (typeof track.setEnabled === 'function') {
-      await track.setEnabled(next);    // preferred
+      await track.setEnabled(next);
     } else if (typeof track.setMuted === 'function') {
-      await track.setMuted(!next);     // fallback
+      await track.setMuted(!next);
     }
     camOn = next;
     updateCamUI(camOn);
@@ -298,6 +306,7 @@ async function leave(){
     try{ await client.leave(); }catch{}
   } finally {
     clearInterval(timerInt);
+    clearTimeout(renewTimer);
     window.location = "lobby.html";
   }
 }
@@ -313,7 +322,7 @@ async function init(){
     if (title) title.textContent = `Audio call — ${displayName}`;
   }
 
-  // Safari prefers h264 for HW decode
+  // Create client (Safari prefers h264 for HW decode)
   client = AgoraRTC.createClient({ mode: "rtc", codec: isSafari ? "h264" : "vp8" });
   
   client.on("connection-state-change", (cur, prev, reason) => {
@@ -332,14 +341,14 @@ async function init(){
       bar?.remove();
     }
   });
-  
 
-  // Token renew handlers
+  // Renew handlers (SDK-driven)
   client.on("token-privilege-will-expire", async () => {
     try {
-      const { token } = await fetchRtcToken({ channel: channelName });
-      await client.renewToken(token);  // <-- pass string
+      const { token, expiresIn } = await fetchRtcToken({ channel: channelName });
+      await client.renewToken(token);  // <- pass string
       console.log("[rtc] token renewed before expiry");
+      if (expiresIn) scheduleProactiveRenew(expiresIn);
     } catch (e) {
       console.error("[rtc] token renew failed (will-expire):", e);
     }
@@ -347,18 +356,88 @@ async function init(){
   
   client.on("token-privilege-did-expire", async () => {
     try {
-      const { token } = await fetchRtcToken({ channel: channelName });
-      await client.renewToken(token);  // <-- pass string
+      const { token, expiresIn } = await fetchRtcToken({ channel: channelName });
+      await client.renewToken(token);  // <- pass string
       console.log("[rtc] token renewed after expiry");
+      if (expiresIn) scheduleProactiveRenew(expiresIn);
     } catch (e) {
       console.error("[rtc] token renew failed (did-expire):", e);
       alert("Your session expired. Please rejoin.");
       window.location = "lobby.html";
     }
   });
-   
 
-  // Remote events
+  // ===== Fetch initial token & join =====
+  const first = await fetchRtcToken({ channel: channelName });
+  const joinToken = first.token;
+  const serverUid = first.uid; // numeric uid from server
+  await client.join(APP_ID, channelName, joinToken, serverUid);
+  if (first.expiresIn) scheduleProactiveRenew(first.expiresIn);
+
+  // ===== Publish local media =====
+  if (isAudioMode){
+    try{
+      localTracks.audio = await AgoraRTC.createMicrophoneAudioTrack({
+        AEC: true, ANS: true, AGC: true
+      });
+      micOn = true;
+      updateMicUI(true);
+    }catch(e){
+      console.error("Mic error:", e);
+      alert("Microphone access denied or unavailable.");
+      throw e;
+    }
+    await client.publish([localTracks.audio]);
+
+    if (audioList) {
+      ensureAudioTile('local', displayName);
+      setAudioTileMuted('local', false);
+    } else {
+      setSimpleAudioLabels(null);
+    }
+
+    if (client.enableAudioVolumeIndicator) client.enableAudioVolumeIndicator();
+    client.on('volume-indicator', (volumes) => {
+      volumes.forEach(v => {
+        const level = (typeof v.level === 'number') ? v.level :
+                      (typeof v.volumeLevel === 'number') ? v.volumeLevel : 0;
+        const speaking = level > 0.06 || level > 6;
+        const who = (String(v.uid) === String(serverUid)) ? 'local' : v.uid;
+        setAudioTileSpeaking(who, speaking);
+      });
+    });
+
+    startTimer();
+    requestWakeLock();
+    try { await replayRemoteAudioTracks(); } catch { showAudioUnlockOverlay(replayRemoteAudioTracks); }
+
+  } else {
+    let mic, cam;
+    try{
+      [mic, cam] = await AgoraRTC.createMicrophoneAndCameraTracks(
+        {},
+        { encoderConfig: { width: 1280, height: 720, frameRate: 30 } }
+      );
+    }catch(e){
+      console.error("Cam/Mic error:", e);
+      alert("Camera/Microphone access denied or unavailable.");
+      throw e;
+    }
+    localTracks.audio = mic;
+    localTracks.video = cam;
+    micOn = true;
+    camOn = true;
+    updateMicUI(true);
+    updateCamUI(true);
+
+    ensureLocalTile();
+    cam.play(`player-local`);
+    await client.publish([mic, cam]);
+
+    requestWakeLock();
+  }
+
+  // ===== Remote events =====
   client.on("user-published", async (user, mediaType) => {
     remoteUsers.set(user.uid, user);
     await client.subscribe(user, mediaType);
@@ -400,73 +479,7 @@ async function init(){
     }
   });
 
-  // ===== Fetch token & join =====
-  const { token: joinToken, uid: serverUid } = await fetchRtcToken({ channel: channelName });
-  await client.join(APP_ID, channelName, joinToken, serverUid);
-
-  if (isAudioMode){
-    try{
-      localTracks.audio = await AgoraRTC.createMicrophoneAudioTrack({
-        AEC: true, ANS: true, AGC: true    // (echo cancel, noise suppress, auto gain)
-      });
-      micOn = true;
-      updateMicUI(true);
-    }catch(e){
-      console.error("Mic error:", e);
-      alert("Microphone access denied or unavailable.");
-      throw e;
-    }
-    await client.publish([localTracks.audio]);
-
-    if (audioList) {
-      ensureAudioTile('local', displayName);
-      setAudioTileMuted('local', false);
-    } else {
-      setSimpleAudioLabels(null);
-    }
-
-    if (client.enableAudioVolumeIndicator) client.enableAudioVolumeIndicator();
-    client.on('volume-indicator', (volumes) => {
-      volumes.forEach(v => {
-        const level = (typeof v.level === 'number') ? v.level :
-                      (typeof v.volumeLevel === 'number') ? v.volumeLevel : 0;
-        const speaking = level > 0.06 || level > 6;
-        const who = (String(v.uid) === String(uid)) ? 'local' : v.uid;
-        setAudioTileSpeaking(who, speaking);
-      });
-    });
-
-    startTimer();
-    requestWakeLock();
-    try { await replayRemoteAudioTracks(); } catch { showAudioUnlockOverlay(replayRemoteAudioTracks); }
-
-  } else {
-    let mic, cam;
-    try{
-      [mic, cam] = await AgoraRTC.createMicrophoneAndCameraTracks(
-        {},
-        { encoderConfig: { width: 1280, height: 720, frameRate: 30 } }
-      );
-    }catch(e){
-      console.error("Cam/Mic error:", e);
-      alert("Camera/Microphone access denied or unavailable.");
-      throw e;
-    }
-    localTracks.audio = mic;
-    localTracks.video = cam;
-    micOn = true;
-    camOn = true;
-    updateMicUI(true);
-    updateCamUI(true);
-
-    ensureLocalTile();
-    cam.play(`player-local`);
-    await client.publish([mic, cam]);
-
-    requestWakeLock();
-  }
-
-  /* Wire controls */
+  // ===== Wire controls =====
   audioMicBtn?.addEventListener("click", (e)=>{ e.preventDefault(); toggleMic(); });
   micBtn?.addEventListener("click", toggleMic);
   camBtn?.addEventListener("click", toggleCam);
@@ -492,12 +505,6 @@ async function init(){
 }
 
 /* ===== Kickoff ===== */
-// init().catch(err => {
-//   console.error("[RTC init] failed:", err);
-//   alert(`Failed to start call: ${err.message || err}`);
-//   window.location = "lobby.html";
-// });
-
 (async () => {
   try { await init(); }
   catch (e) {

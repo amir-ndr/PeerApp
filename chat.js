@@ -21,7 +21,6 @@ const params  = new URLSearchParams(window.location.search);
 const rawRoom = (params.get("room") || "").trim();
 const rawName = (params.get("name") || "").trim();
 
-// Allow Unicode letters/numbers + . _ - and spaces; collapse spaces to "-"
 function cleanRoom(s) {
   const t = (s || "")
     .replace(/[^\p{L}\p{N}._\-\s]/gu, "")
@@ -29,7 +28,6 @@ function cleanRoom(s) {
     .replace(/\s+/g, "-");
   return t && t.length <= 64 ? t : "";
 }
-// UI name: allow Unicode letters/numbers/space/._- and cap length
 function cleanName(s) {
   return (s || "").replace(/[^\p{L}\p{N}\s._-]/gu, "").slice(0, 30) || "";
 }
@@ -38,19 +36,21 @@ const roomId = cleanRoom(rawRoom);
 const displayName = cleanName(rawName) || `Guest-${Math.random().toString(36).slice(2,6)}`;
 
 if (!roomId) {
-  console.warn("[chat] Invalid room param:", rawRoom);
-  if ($roomIdEl) $roomIdEl.textContent = "Invalid room code";
-  alert("Missing or invalid room code in URL. Example:\n/chat.html?room=room-1&name=Amir");
+  alert("Missing or invalid room code. Redirecting to lobby.");
+  window.location = "lobby.html";
+  // IMPORTANT: return so nothing else runs on this page
+  throw new Error("no-room"); // stops script execution in some bundlers
 }
 
-const channelName = roomId ? `chat_${roomId}` : "";
-if ($roomIdEl && roomId) $roomIdEl.textContent = `${roomId} — ${displayName}`;
+const channelName = `chat_${roomId}`;
+if ($roomIdEl) $roomIdEl.textContent = `${roomId} — ${displayName}`;
 
 // ---------- State ----------
 let client = null;
 let channel = null;
 let joined = false;
 let rtmAccount = null; // server-assigned opaque id
+let renewTimer = null; // optional proactive renew
 
 // ---------- Avatar (UI only) ----------
 function initials(s) {
@@ -73,7 +73,6 @@ function tokenUrl(path){
   return `${base}/${String(path || "").replace(/^\//, "")}`;
 }
 async function fetchRtmToken() {
-  if (!channelName) throw new Error("No channel name (room missing)");
   const res = await fetch(tokenUrl("token"), {
     method: "POST",
     headers: {
@@ -91,6 +90,21 @@ async function fetchRtmToken() {
   const data = await res.json(); // { token, account, expiresIn }
   if (!data?.token || !data?.account) throw new Error("Bad RTM token payload");
   return data;
+}
+function scheduleProactiveRenew(expiresIn) {
+  clearTimeout(renewTimer);
+  if (!expiresIn || !Number.isFinite(expiresIn)) return;
+  const ms = Math.max(10_000, (expiresIn - 60) * 1000); // renew ~60s early
+  renewTimer = setTimeout(async () => {
+    try {
+      const t = await fetchRtmToken();
+      await client.renewToken(t.token);
+      console.log("[chat] proactive RTM token renewed");
+      if (t.expiresIn) scheduleProactiveRenew(t.expiresIn);
+    } catch (e) {
+      console.error("[chat] proactive RTM renew failed:", e);
+    }
+  }, ms);
 }
 
 // Prevent double init (hot reloads)
@@ -144,8 +158,6 @@ function setStatus(state) {
 // ---------- Core ----------
 async function init() {
   try {
-    if (!channelName) return; // handled above
-
     // 1) Make sure RTM SDK is on the page
     if (!window.AgoraRTM || typeof AgoraRTM.createInstance !== "function") {
       console.error("[chat] Agora RTM SDK not loaded (missing <script src='AgoraRTM_*.js'>)");
@@ -163,9 +175,10 @@ async function init() {
     });
 
     // 3) Login with RTM token
-    const { token, account } = await fetchRtmToken();
+    const { token, account, expiresIn } = await fetchRtmToken();
     rtmAccount = account;
     await client.login({ uid: rtmAccount, token });
+    if (expiresIn) scheduleProactiveRenew(expiresIn);
 
     // 4) Join channel
     channel = client.createChannel(channelName);
@@ -174,12 +187,13 @@ async function init() {
     setStatus("online");
     appendSystem(`Joined chat room: ${channelName}`);
 
-    // 5) Renew token automatically
+    // 5) Renew token automatically (SDK-driven)
     const renew = async () => {
       try {
         const t = await fetchRtmToken();
         await client.renewToken(t.token);
         console.log("[chat] RTM token renewed");
+        if (t.expiresIn) scheduleProactiveRenew(t.expiresIn);
       } catch (e) {
         console.error("[chat] RTM token renew failed:", e);
         appendSystem("⚠️ Token renewal failed; attempting reconnection…");
@@ -253,6 +267,7 @@ async function onSend(e) {
 }
 
 async function cleanup() {
+  clearTimeout(renewTimer);
   try { if ($composer) $composer.removeEventListener("submit", onSend); } catch {}
   try { if (channel && joined) await channel.leave(); } catch {}
   try { if (client) await client.logout(); } catch {}
