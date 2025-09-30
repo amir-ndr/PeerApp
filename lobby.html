@@ -7,6 +7,13 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="lobby.css" />
+  <style>
+    /* small a11y/ux improvements */
+    :root { color-scheme: light dark; }
+    #error { color: #e23; margin-top: 8px; }
+    .btn[aria-busy="true"] { opacity: .7; pointer-events: none; }
+    input, button { font-size: 16px; } /* prevent iOS zoom */
+  </style>
 </head>
 <body>
   <main id="lobby">
@@ -31,6 +38,7 @@
           autocomplete="off"
           required
           aria-required="true"
+          autofocus
         />
 
         <label for="display_name" class="sr-only">Your name</label>
@@ -64,39 +72,85 @@
   </main>
 
   <script>
+    // ---- DOM refs
     const input = document.getElementById('room_code');
     const nameInput = document.getElementById('display_name');
     const errorEl = document.getElementById('error');
+    const btnChat  = document.getElementById('go-chat');
+    const btnVideo = document.getElementById('go-video');
+    const btnAudio = document.getElementById('go-audio');
 
-    function nav(urlPattern) {
-      const code = (input.value || '').trim();
-      const name = (nameInput.value || '').trim();
+    // ---- Client-only gate so copy/paste links don't jump into rooms
+    const ENTRY_KEY = 'peerapp:entry';
+    function setEntryFlag() {
+      // short-lived flag (store timestamp; pages can also check freshness if you want)
+      sessionStorage.setItem(ENTRY_KEY, String(Date.now()));
+    }
+
+    // (Optional) server-enforced gate. If /api/session exists, it will set a signed cookie.
+    async function ensureServerSession() {
+      try {
+        const res = await fetch('/api/session', { method: 'GET', credentials: 'include', cache: 'no-store' });
+        // If endpoint doesn’t exist or returns non-2xx, we just continue with client flag.
+      } catch (_) {}
+    }
+
+    // ---- Sanitizers (Unicode friendly)
+    // Allow letters/numbers (any language), dot, underscore, hyphen, and spaces (which become -)
+    function cleanRoom(v) {
+      return (v || '')
+        .replace(/[^\p{L}\p{N}._\-\s]/gu, '')
+        .trim()
+        .replace(/\s+/g, '-')
+        .slice(0, 64); // cap length
+    }
+    // UI name; keep it simple and safe
+    function cleanName(v) {
+      return (v || '')
+        .replace(/[^\p{L}\p{N}\s._-]/gu, '')
+        .trim()
+        .slice(1, 31) || (v || '').trim().slice(0, 30); // avoid empty after cleaning
+    }
+
+    function setBusy(btn, on) {
+      if (!btn) return;
+      btn.setAttribute('aria-busy', on ? 'true' : 'false');
+    }
+
+    async function go(urlPattern, btn) {
+      const rawCode = (input.value || '').trim();
+      const rawName = (nameInput.value || '').trim();
+      const code = cleanRoom(rawCode);
+      const name = cleanName(rawName);
+
       if (!code || !name) {
         errorEl.hidden = false;
         (!code ? input : nameInput).focus();
         return;
       }
       errorEl.hidden = true;
+
+      // Gate: set client flag + try server cookie
+      setBusy(btn, true);
+      setEntryFlag();
+      await ensureServerSession(); // safe to ignore failures
+
       const url = urlPattern
         .replace('{code}', encodeURIComponent(code))
         + `&name=${encodeURIComponent(name)}`;
+
       window.location = url;
     }
 
-    document.getElementById('go-chat').addEventListener('click', () => {
-      nav('chat.html?room={code}');
-    });
-    document.getElementById('go-video').addEventListener('click', () => {
-      nav('index.html?room={code}&mode=video');
-    });
-    document.getElementById('go-audio').addEventListener('click', () => {
-      nav('index.html?room={code}&mode=audio');
-    });
+    // Buttons
+    btnChat.addEventListener('click',  () => go('chat.html?room={code}', btnChat));
+    btnVideo.addEventListener('click', () => go('index.html?room={code}&mode=video', btnVideo));
+    btnAudio.addEventListener('click', () => go('index.html?room={code}&mode=audio', btnAudio));
 
-    // Submit on Enter to default to Video Call
+    // Submit on Enter -> default to Video Call
     document.getElementById('join-form').addEventListener('submit', (e) => {
       e.preventDefault();
-      nav('index.html?room={code}&mode=video');
+      go('index.html?room={code}&mode=video', btnVideo);
     });
   </script>
 </body>
