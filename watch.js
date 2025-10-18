@@ -38,9 +38,27 @@ let client;
 let localTracks = { audio: null };
 const remoteUsers = new Map();
 let currentVideoUrl = '';
+let currentVideoInfo = null;
 let isHost = false;
 let micOn = true;
 let dataStream = null;
+let isInitialized = false;
+
+// ===== Data Stream Utilities =====
+async function waitForDataStream(maxWaitTime = 5000) {
+  const startTime = Date.now();
+  while (!dataStream && (Date.now() - startTime) < maxWaitTime) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  if (!dataStream) {
+    throw new Error('Data stream not available after waiting');
+  }
+  return dataStream;
+}
+
+function isDataStreamReady() {
+  return dataStream && dataStream.sendData;
+}
 
 // ===== Video URL parsing =====
 function extractVideoInfo(url) {
@@ -91,7 +109,8 @@ function createVideoEmbed(videoInfo) {
         frameborder="0" 
         allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
         allowfullscreen
-        style="border: none;">
+        style="border: none;"
+        id="video-iframe">
       </iframe>
     `;
   } else if (videoInfo.type === 'vimeo') {
@@ -103,7 +122,8 @@ function createVideoEmbed(videoInfo) {
         frameborder="0" 
         allow="autoplay; fullscreen; picture-in-picture" 
         allowfullscreen
-        style="border: none;">
+        style="border: none;"
+        id="video-iframe">
       </iframe>
     `;
   }
@@ -111,8 +131,12 @@ function createVideoEmbed(videoInfo) {
   throw new Error('Unsupported video platform');
 }
 
-function loadVideo(url) {
+async function loadVideo(url) {
   console.log("Loading video:", url);
+  
+  // Show loading state
+  loadVideoBtn.disabled = true;
+  loadVideoBtn.textContent = 'Loading...';
   
   try {
     const videoInfo = extractVideoInfo(url);
@@ -124,6 +148,7 @@ function loadVideo(url) {
     }
     
     currentVideoUrl = url;
+    currentVideoInfo = videoInfo;
     
     // Create and insert the embed
     const embedHTML = createVideoEmbed(videoInfo);
@@ -138,40 +163,76 @@ function loadVideo(url) {
     videoTitle.textContent = title;
     
     // Broadcast to other participants if host
-    if (isHost && dataStream) {
-      const message = {
-        type: 'video-state',
-        url: url,
-        title: title,
-        videoInfo: videoInfo,
-        timestamp: Date.now(),
-        sender: displayName
-      };
-      sendDataMessage(message);
-      addChatMessage('System', `Host loaded a new ${videoInfo.type} video`, false);
+    if (isHost) {
+      await broadcastVideoState(url, title, videoInfo);
     }
     
     console.log("Video loaded successfully");
     
   } catch (error) {
     console.error('Error loading video:', error);
+    addChatMessage('System', `Error loading video: ${error.message}`, false);
     alert('Error loading video. Please check the URL and try again.\n\nMake sure you are using a valid YouTube or Vimeo URL.');
+  } finally {
+    loadVideoBtn.disabled = false;
+    loadVideoBtn.textContent = 'Load Video';
+  }
+}
+
+async function broadcastVideoState(url, title, videoInfo, maxRetries = 3) {
+  if (!isHost) return;
+  
+  try {
+    await waitForDataStream();
+    
+    let retries = 0;
+    const sendWithRetry = async () => {
+      try {
+        const message = {
+          type: 'video-state',
+          url: url,
+          title: title,
+          videoInfo: videoInfo,
+          timestamp: Date.now(),
+          sender: displayName
+        };
+        sendDataMessage(message);
+        addChatMessage('System', `Host loaded a new ${videoInfo.type} video`, false);
+        console.log('Video state broadcast successfully');
+      } catch (error) {
+        retries++;
+        if (retries <= maxRetries) {
+          console.warn(`Retrying video state broadcast (${retries}/${maxRetries})...`);
+          await new Promise(resolve => setTimeout(resolve, 500 * retries));
+          return sendWithRetry();
+        } else {
+          throw new Error(`Failed to broadcast video after ${maxRetries} attempts`);
+        }
+      }
+    };
+    
+    await sendWithRetry();
+  } catch (error) {
+    console.error('Failed to broadcast video state:', error);
+    addChatMessage('System', 'Warning: Could not sync video with all participants', false);
   }
 }
 
 // ===== Data Channel Messaging =====
 function sendDataMessage(message) {
-  if (!dataStream) {
-    console.warn('Data stream not available');
-    return;
+  if (!isDataStreamReady()) {
+    console.warn('Data stream not available or not ready');
+    return false;
   }
   
   try {
     const data = JSON.stringify(message);
     dataStream.sendData(data);
     console.log('Sent data message:', message.type);
+    return true;
   } catch (error) {
     console.error('Failed to send data message:', error);
+    return false;
   }
 }
 
@@ -193,21 +254,57 @@ function handleDataMessage(message) {
         
       case 'sync-request':
         if (isHost && currentVideoUrl) {
-          // Re-broadcast current video state
-          const videoState = {
-            type: 'video-state',
-            url: currentVideoUrl,
-            title: videoTitle.textContent,
-            timestamp: Date.now(),
-            sender: displayName
-          };
-          sendDataMessage(videoState);
-          addChatMessage('System', `${data.requester} requested video sync`, false);
+          handleSyncRequest(data);
         }
+        break;
+        
+      case 'user-joined':
+        updateParticipantsList();
         break;
     }
   } catch (error) {
     console.error('Error processing data message:', error);
+  }
+}
+
+function handleSyncRequest(data) {
+  // Re-broadcast current video state to the requester
+  if (currentVideoUrl && currentVideoInfo) {
+    const videoState = {
+      type: 'video-state',
+      url: currentVideoUrl,
+      title: videoTitle.textContent,
+      videoInfo: currentVideoInfo,
+      timestamp: Date.now(),
+      sender: displayName,
+      isSyncResponse: true
+    };
+    sendDataMessage(videoState);
+    addChatMessage('System', `${data.requester} requested video sync`, false);
+  }
+}
+
+function handleRemoteVideoState(data) {
+  console.log('Handling remote video state:', data);
+  
+  // Prevent infinite loop if this is our own message
+  if (data.sender === displayName) return;
+  
+  if (data.url && data.url !== currentVideoUrl) {
+    // Load the new video
+    loadVideo(data.url);
+  }
+  
+  // Update video metadata
+  if (data.title) {
+    videoTitle.textContent = data.title;
+  }
+  if (data.videoInfo) {
+    currentVideoInfo = data.videoInfo;
+  }
+  
+  if (data.isSyncResponse) {
+    addChatMessage('System', 'Video synced with host', false);
   }
 }
 
@@ -224,20 +321,15 @@ function syncVideoWithHost() {
       timestamp: Date.now()
     };
     
-    sendDataMessage(message);
-    addChatMessage('System', 'Requested video sync with host', true);
+    if (sendDataMessage(message)) {
+      addChatMessage('System', 'Requested video sync with host', true);
+    } else {
+      addChatMessage('System', 'Failed to send sync request - try again', true);
+    }
   } catch (error) {
     console.error('Failed to send sync request:', error);
+    addChatMessage('System', 'Error requesting sync', true);
   }
-}
-
-function handleRemoteVideoState(data) {
-  console.log('Handling remote video state:', data);
-  if (data.url && data.url !== currentVideoUrl) {
-    // Load the new video
-    loadVideo(data.url);
-  }
-  videoTitle.textContent = data.title;
 }
 
 // ===== UI Updates =====
@@ -328,6 +420,16 @@ function updateMicUI() {
 
 async function leave() {
   try {
+    // Notify others about leaving
+    if (isDataStreamReady()) {
+      const leaveMessage = {
+        type: 'user-left',
+        user: displayName,
+        timestamp: Date.now()
+      };
+      sendDataMessage(leaveMessage);
+    }
+    
     if (localTracks.audio) {
       localTracks.audio.stop();
       localTracks.audio.close();
@@ -346,70 +448,7 @@ async function leave() {
   }
 }
 
-// ===== Initialize =====
-async function init() {
-  if (window.__watchInit) return;
-  window.__watchInit = true;
-  
-  try {
-    console.log("Initializing watch room...");
-    
-    // Create client
-    client = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
-    
-    // Set up event listeners first
-    setupEventListeners();
-    
-    // Fetch token and join
-    const tokenData = await fetchRtcToken({ channel: channelName });
-    await client.join(APP_ID, channelName, tokenData.token, tokenData.uid);
-    
-    // Determine if host (first user in room)
-    isHost = client.remoteUsers.length === 0;
-    console.log("Is host:", isHost);
-    
-    // Create data stream
-    try {
-      dataStream = await client.createDataStream({
-        ordered: true,
-        reliable: true
-      });
-      console.log('Data stream created successfully');
-    } catch (streamError) {
-      console.warn('Data stream creation failed:', streamError);
-    }
-    
-    // Create and publish audio track
-    try {
-      localTracks.audio = await AgoraRTC.createMicrophoneAudioTrack({
-        AEC: true, ANS: true, AGC: true
-      });
-      await client.publish([localTracks.audio]);
-      console.log('Audio track published');
-    } catch (audioError) {
-      console.warn('Microphone access denied, continuing without audio:', audioError);
-      addChatMessage('System', 'Microphone access denied - you can still watch and chat', false);
-    }
-    
-    micOn = true;
-    updateMicUI();
-    updateParticipantsList();
-    
-    // Show success message
-    addChatMessage('System', `Joined room "${roomId}" as ${isHost ? 'host 👑' : 'participant'}`, false);
-    if (isHost) {
-      addChatMessage('System', 'You are the host - you can load videos for everyone', false);
-    }
-    
-    console.log("Watch room initialized successfully");
-    
-  } catch (error) {
-    console.error('Initialization failed:', error);
-    alert('Failed to join room. Please try again.');
-    window.location = "lobby.html";
-  }
-}
-
+// ===== Event Handlers =====
 function setupEventListeners() {
   console.log("Setting up event listeners...");
   
@@ -443,8 +482,12 @@ function setupEventListeners() {
   // Audio controls
   watchMicBtn.addEventListener('click', toggleMic);
   watchLeaveBtn.addEventListener('click', leave);
+}
+
+function setupAgoraEventListeners() {
+  if (!client) return;
   
-  // Agora events
+  // User events
   client.on("user-published", async (user, mediaType) => {
     console.log("User published:", user.uid, mediaType);
     await client.subscribe(user, mediaType);
@@ -465,6 +508,18 @@ function setupEventListeners() {
     
     updateParticipantsList();
     addChatMessage('System', `User ${user.uid} joined the room`, false);
+    
+    // If host, send current video state to new user
+    if (isHost && currentVideoUrl && isInitialized) {
+      setTimeout(async () => {
+        try {
+          await broadcastVideoState(currentVideoUrl, videoTitle.textContent, currentVideoInfo);
+          console.log('Sent video state to new user:', user.uid);
+        } catch (error) {
+          console.error('Failed to send video state to new user:', error);
+        }
+      }, 1000);
+    }
   });
   
   client.on("user-unpublished", (user, mediaType) => {
@@ -485,17 +540,28 @@ function setupEventListeners() {
     addChatMessage('System', `User ${user.uid} left the room`, false);
   });
   
-  // Data channel messages
-  if (dataStream) {
-    dataStream.on("message", (message) => {
-      handleDataMessage(message);
-    });
-  }
+  // Connection state monitoring
+  client.on("connection-state-change", (curState, prevState) => {
+    console.log('Connection state changed:', prevState, '->', curState);
+    if (curState === 'DISCONNECTED') {
+      addChatMessage('System', 'Connection lost. Attempting to reconnect...', false);
+    } else if (curState === 'CONNECTED') {
+      addChatMessage('System', 'Connection restored', false);
+      // Resync video if host reconnects
+      if (isHost && currentVideoUrl && isInitialized) {
+        setTimeout(() => {
+          broadcastVideoState(currentVideoUrl, videoTitle.textContent, currentVideoInfo);
+        }, 1000);
+      }
+    } else if (curState === 'RECONNECTING') {
+      addChatMessage('System', 'Reconnecting...', false);
+    }
+  });
 }
 
 function sendMessage() {
   const text = messageInput.value.trim();
-  if (!text || !dataStream) return;
+  if (!text || !isDataStreamReady()) return;
   
   try {
     const message = {
@@ -505,11 +571,106 @@ function sendMessage() {
       timestamp: Date.now()
     };
     
-    sendDataMessage(message);
-    addChatMessage(displayName, text, true);
-    messageInput.value = '';
+    if (sendDataMessage(message)) {
+      addChatMessage(displayName, text, true);
+      messageInput.value = '';
+    } else {
+      addChatMessage('System', 'Failed to send message - try again', true);
+    }
   } catch (error) {
     console.error('Failed to send message:', error);
+    addChatMessage('System', 'Error sending message', true);
+  }
+}
+
+// ===== Initialize =====
+async function init() {
+  if (window.__watchInit) return;
+  window.__watchInit = true;
+  
+  try {
+    console.log("Initializing watch room...");
+    
+    // Set up UI event listeners first
+    setupEventListeners();
+    
+    // Create client
+    client = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
+    
+    // Set up Agora event listeners
+    setupAgoraEventListeners();
+    
+    // Fetch token and join
+    const tokenData = await fetchRtcToken({ channel: channelName });
+    await client.join(APP_ID, channelName, tokenData.token, tokenData.uid);
+    
+    // Determine if host (first user in room)
+    isHost = client.remoteUsers.length === 0;
+    console.log("Is host:", isHost);
+    
+    // Create data stream with retry
+    let dataStreamCreated = false;
+    let retries = 3;
+    
+    while (!dataStreamCreated && retries > 0) {
+      try {
+        dataStream = await client.createDataStream({
+          ordered: true,
+          reliable: true
+        });
+        
+        // Set up data stream event listener immediately
+        dataStream.on("message", (message) => {
+          handleDataMessage(message);
+        });
+        
+        dataStreamCreated = true;
+        console.log('Data stream created successfully');
+      } catch (streamError) {
+        retries--;
+        console.warn(`Data stream creation failed, ${retries} retries left:`, streamError);
+        if (retries > 0) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
+    }
+    
+    if (!dataStreamCreated) {
+      console.error('Failed to create data stream after 3 attempts');
+      addChatMessage('System', 'Warning: Some features may not work properly', false);
+    }
+    
+    // Create and publish audio track
+    try {
+      localTracks.audio = await AgoraRTC.createMicrophoneAudioTrack({
+        AEC: true, ANS: true, AGC: true
+      });
+      await client.publish([localTracks.audio]);
+      console.log('Audio track published');
+    } catch (audioError) {
+      console.warn('Microphone access denied, continuing without audio:', audioError);
+      addChatMessage('System', 'Microphone access denied - you can still watch and chat', false);
+    }
+    
+    micOn = true;
+    updateMicUI();
+    updateParticipantsList();
+    
+    // Mark as initialized
+    isInitialized = true;
+    
+    // Show success message
+    addChatMessage('System', `Joined room "${roomId}" as ${isHost ? 'host 👑' : 'participant'}`, false);
+    if (isHost) {
+      addChatMessage('System', 'You are the host - you can load videos for everyone', false);
+    }
+    
+    console.log("Watch room initialized successfully");
+    
+  } catch (error) {
+    console.error('Initialization failed:', error);
+    alert('Failed to join room. Please try again.');
+    window.location = "lobby.html";
   }
 }
 
