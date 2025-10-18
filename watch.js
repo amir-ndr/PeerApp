@@ -40,12 +40,8 @@ let localTracks = { audio: null };
 const remoteUsers = new Map();
 let currentVideoUrl = '';
 let isHost = false;
-let videoState = {
-  playing: false,
-  currentTime: 0,
-  url: '',
-  title: 'No video loaded'
-};
+let micOn = true;
+let dataStream = null;
 
 // ===== Video URL parsing and embedding =====
 function extractVideoInfo(url) {
@@ -164,17 +160,20 @@ function loadVideo(url) {
     playPauseBtn.disabled = false;
     
     // Update video state
-    videoState = {
+    const videoState = {
+      type: 'video-state',
       playing: false,
       currentTime: 0,
       url: url,
       title: title,
-      videoInfo: videoInfo
+      videoInfo: videoInfo,
+      timestamp: Date.now(),
+      sender: displayName
     };
     
     // Broadcast to other participants if host
-    if (isHost) {
-      broadcastVideoState();
+    if (isHost && dataStream) {
+      sendDataMessage(videoState);
       addChatMessage('System', `Host loaded a new video: ${title}`, false);
     }
     
@@ -184,21 +183,54 @@ function loadVideo(url) {
   }
 }
 
-function broadcastVideoState() {
-  if (!client) return;
+// ===== Data Channel Messaging =====
+function sendDataMessage(message) {
+  if (!dataStream) {
+    console.warn('Data stream not available');
+    return;
+  }
   
   try {
-    const message = {
-      type: 'video-state',
-      data: videoState,
-      timestamp: Date.now(),
-      sender: displayName
-    };
-    
-    client.sendStreamMessage(message);
-    console.log('Broadcast video state:', message);
+    const data = JSON.stringify(message);
+    dataStream.sendData(data);
+    console.log('Sent data message:', message.type);
   } catch (error) {
-    console.error('Failed to broadcast video state:', error);
+    console.error('Failed to send data message:', error);
+  }
+}
+
+function handleDataMessage(message) {
+  try {
+    const data = JSON.parse(message);
+    
+    switch (data.type) {
+      case 'video-state':
+        if (!isHost) {
+          handleRemoteVideoState(data);
+        }
+        break;
+        
+      case 'chat-message':
+        addChatMessage(data.sender, data.text, false);
+        break;
+        
+      case 'sync-request':
+        if (isHost) {
+          // Re-broadcast current video state
+          const videoState = {
+            type: 'video-state',
+            url: currentVideoUrl,
+            title: videoTitle.textContent,
+            timestamp: Date.now(),
+            sender: displayName
+          };
+          sendDataMessage(videoState);
+          addChatMessage('System', `${data.requester} requested video sync`, false);
+        }
+        break;
+    }
+  } catch (error) {
+    console.error('Error processing data message:', error);
   }
 }
 
@@ -208,17 +240,25 @@ function syncVideoWithHost() {
   try {
     const message = {
       type: 'sync-request',
-      data: { 
-        requester: displayName,
-        currentTime: videoState.currentTime
-      }
+      requester: displayName,
+      currentTime: 0,
+      timestamp: Date.now()
     };
     
-    client.sendStreamMessage(message);
+    sendDataMessage(message);
     addChatMessage('System', 'Requested video sync with host', true);
   } catch (error) {
     console.error('Failed to send sync request:', error);
   }
+}
+
+function handleRemoteVideoState(data) {
+  if (data.url && data.url !== currentVideoUrl) {
+    // Load the new video
+    loadVideo(data.url);
+  }
+  videoTitle.textContent = data.title;
+  addChatMessage('System', `Host updated the video: ${data.title}`, false);
 }
 
 // ===== UI Updates =====
@@ -286,8 +326,6 @@ function tokenUrl(path) {
   return `${base}/${p}`;
 }
 
-let micOn = true;
-
 async function toggleMic() {
   const track = localTracks.audio;
   if (!track) return;
@@ -315,6 +353,9 @@ async function leave() {
     if (localTracks.audio) {
       localTracks.audio.stop();
       localTracks.audio.close();
+    }
+    if (dataStream) {
+      dataStream.close();
     }
     if (client) {
       await client.unpublish();
@@ -346,6 +387,17 @@ async function init() {
     // Determine if host (first user in room)
     isHost = client.remoteUsers.length === 0;
     
+    // Create data stream
+    try {
+      dataStream = await AgoraRTC.createDataStream({
+        ordered: true,
+        reliable: true
+      });
+      console.log('Data stream created successfully');
+    } catch (streamError) {
+      console.warn('Data stream creation failed:', streamError);
+    }
+    
     // Create and publish audio track
     try {
       localTracks.audio = await AgoraRTC.createMicrophoneAudioTrack({
@@ -360,11 +412,6 @@ async function init() {
     micOn = true;
     updateMicUI();
     updateParticipantsList();
-    
-    // Enable volume indicator for audio visualization
-    if (client.enableAudioVolumeIndicator) {
-      client.enableAudioVolumeIndicator();
-    }
     
     // Show success message
     addChatMessage('System', `Joined room "${roomId}" as ${isHost ? 'host 👑' : 'participant'}`, false);
@@ -456,60 +503,26 @@ function setupEventListeners() {
   });
   
   // Data channel messages
-  client.on("stream-message", (uid, streamId, data) => {
-    try {
-      const message = typeof data === 'string' ? JSON.parse(data) : data;
-      
-      switch (message.type) {
-        case 'video-state':
-          if (!isHost) {
-            handleRemoteVideoState(message);
-          }
-          break;
-          
-        case 'chat-message':
-          addChatMessage(message.data.sender, message.data.text, false);
-          break;
-          
-        case 'sync-request':
-          if (isHost) {
-            broadcastVideoState();
-            addChatMessage('System', `${message.data.requester} requested video sync`, false);
-          }
-          break;
-      }
-    } catch (error) {
-      console.error('Error processing stream message:', error);
-    }
-  });
-}
-
-function handleRemoteVideoState(message) {
-  if (message.data.url !== currentVideoUrl) {
-    // Load the new video
-    loadVideo(message.data.url);
+  if (dataStream) {
+    dataStream.on("message", (message) => {
+      handleDataMessage(message);
+    });
   }
-  videoState = message.data;
-  videoTitle.textContent = message.data.title;
-  
-  addChatMessage('System', `Host updated the video: ${message.data.title}`, false);
 }
 
 function sendMessage() {
   const text = messageInput.value.trim();
-  if (!text || !client) return;
+  if (!text || !dataStream) return;
   
   try {
     const message = {
       type: 'chat-message',
-      data: {
-        sender: displayName,
-        text: text,
-        timestamp: Date.now()
-      }
+      sender: displayName,
+      text: text,
+      timestamp: Date.now()
     };
     
-    client.sendStreamMessage(message);
+    sendDataMessage(message);
     addChatMessage(displayName, text, true);
     messageInput.value = '';
   } catch (error) {
