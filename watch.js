@@ -49,6 +49,9 @@ let ytPlayer = null;
 let activeKind = null; // 'youtube' | 'html5'
 let currentUrl = "";
 
+// Prevent echo loops when programmatic changes fire events
+let suppressNextEvent = false;
+
 // ======== Helpers ========
 function tokenUrl(path){
   const base = TOKEN_API_BASE.replace(/\/$/, "");
@@ -98,15 +101,20 @@ function broadcast(msg){
 }
 
 function seconds() {
-  if (activeKind === 'youtube' && ytPlayer) return ytPlayer.getCurrentTime();
+  if (activeKind === 'youtube' && ytPlayer && ytPlayer.getCurrentTime) return ytPlayer.getCurrentTime();
   if (activeKind === 'html5' && html5Video) return html5Video.currentTime || 0;
   return 0;
 }
 
-function duration() {
-  if (activeKind === 'youtube' && ytPlayer) return ytPlayer.getDuration();
-  if (activeKind === 'html5' && html5Video) return html5Video.duration || 0;
-  return 0;
+function isPlaying() {
+  if (activeKind === 'youtube' && ytPlayer && ytPlayer.getPlayerState) {
+    // YT: 1=playing
+    return ytPlayer.getPlayerState() === 1;
+  }
+  if (activeKind === 'html5' && html5Video) {
+    return !html5Video.paused && !html5Video.ended;
+  }
+  return false;
 }
 
 function setPeopleUI(){
@@ -134,11 +142,18 @@ function showHtml5Player(){
   if (ytPlayer) try { ytPlayer.stopVideo(); } catch {}
 }
 
-function loadYouTube(id, start=0){
+function loadYouTube(id, start=0, autoPlay=false){
   showYouTubePlayer();
+  const doSeekAndMaybePlay = () => {
+    try {
+      if (start>0) ytPlayer.seekTo(start, true);
+      if (autoPlay) ytPlayer.playVideo();
+      else ytPlayer.pauseVideo();
+    } catch {}
+  };
+
   if (!window.YT || !YT.Player) {
-    // Wait until the API is ready
-    window.onYouTubeIframeAPIReady = () => loadYouTube(id, start);
+    window.onYouTubeIframeAPIReady = () => loadYouTube(id, start, autoPlay);
     return;
   }
   if (!ytPlayer) {
@@ -146,10 +161,10 @@ function loadYouTube(id, start=0){
       videoId: id,
       playerVars: { autoplay: 0 },
       events: {
-        onReady: () => { if (start>0) ytPlayer.seekTo(start, true); },
+        onReady: () => { doSeekAndMaybePlay(); },
         onStateChange: (e) => {
-          // 1=play, 2=pause, 0=ended, 3=buffering, 5=cued
           if (!iAmHost) return;
+          if (suppressNextEvent) { suppressNextEvent = false; return; }
           if (e.data === 1) broadcast({ t:'play', at: ytPlayer.getCurrentTime() });
           if (e.data === 2) broadcast({ t:'pause', at: ytPlayer.getCurrentTime() });
         }
@@ -157,37 +172,49 @@ function loadYouTube(id, start=0){
     });
   } else {
     ytPlayer.loadVideoById(id, start);
+    if (!autoPlay) {
+      // YT auto-plays on loadVideoById; pause if needed
+      suppressNextEvent = true;
+      ytPlayer.pauseVideo();
+    }
   }
 }
 
-function loadHtml5(url, start=0){
+function attachHtml5Handlers(){
+  html5Video.onplay = () => { if (iAmHost && !suppressNextEvent) broadcast({ t:'play', at: html5Video.currentTime }); suppressNextEvent = false; };
+  html5Video.onpause = () => { if (iAmHost && !suppressNextEvent) broadcast({ t:'pause', at: html5Video.currentTime }); suppressNextEvent = false; };
+  html5Video.onseeked = () => { if (iAmHost && !suppressNextEvent) broadcast({ t:'seek', at: html5Video.currentTime }); suppressNextEvent = false; };
+}
+
+function loadHtml5(url, start=0, autoPlay=false){
   showHtml5Player();
   html5Video.src = url;
   html5Video.currentTime = start || 0;
-  // Host events
-  const ensureHandlers = () => {
-    html5Video.onplay = () => { if (iAmHost) broadcast({ t:'play', at: html5Video.currentTime }); };
-    html5Video.onpause = () => { if (iAmHost) broadcast({ t:'pause', at: html5Video.currentTime }); };
-    html5Video.onseeked = () => { if (iAmHost) broadcast({ t:'seek', at: html5Video.currentTime }); };
-  };
-  ensureHandlers();
+  attachHtml5Handlers();
+  if (autoPlay) {
+    html5Video.play().catch(()=>{});
+  } else {
+    suppressNextEvent = true;
+    html5Video.pause();
+  }
 }
 
-function handleLoadUrl(url, start=0){
+function handleLoadUrl(url, start=0, autoPlay=false){
   currentUrl = url;
   if (isYouTube(url)) {
     const id = ytIdFrom(url);
     if (!id) return alert("Could not parse YouTube link.");
-    loadYouTube(id, start);
+    loadYouTube(id, start, autoPlay);
   } else if (/\.(mp4|webm|ogg)(\?|$)/i.test(url)) {
-    loadHtml5(url, start);
+    loadHtml5(url, start, autoPlay);
   } else {
     alert("Unsupported link. Use YouTube or a direct .mp4/.webm/.ogg URL.");
   }
-  if (iAmHost) broadcast({ t:'load', url, start });
+  if (iAmHost) broadcast({ t:'load', url, start, playing: autoPlay, kind: activeKind, hostUid });
 }
 
 function syncToHost(at, playing){
+  suppressNextEvent = true;
   if (activeKind === 'youtube' && ytPlayer) {
     ytPlayer.seekTo(at, true);
     if (playing) ytPlayer.playVideo(); else ytPlayer.pauseVideo();
@@ -199,10 +226,9 @@ function syncToHost(at, playing){
 
 // ======== RTC join (audio + data stream) ========
 async function join(){
-  // Create client (audio only)
   client = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
 
-  client.on("connection-state-change", (cur, prev) => {
+  client.on("connection-state-change", (cur) => {
     if (cur === "DISCONNECTED" || cur === "RECONNECTING") {
       let bar = document.getElementById("net-banner");
       if (!bar){
@@ -216,37 +242,66 @@ async function join(){
     }
   });
 
-  // Remote users join/leave
   client.on("user-joined", (user) => {
     peers.set(user.uid, { name: String(user.uid) });
     setPeopleUI();
+    // If I'm the host and someone new joins, proactively push state
+    if (iAmHost && currentUrl) {
+      broadcast({ t:'state', url: currentUrl, at: seconds(), playing: isPlaying(), kind: activeKind, hostUid });
+    }
   });
+
   client.on("user-left", (user) => {
     peers.delete(user.uid);
     if (user.uid === hostUid) { hostUid = null; iAmHost = false; }
     setPeopleUI();
   });
 
-  // Data stream messages
-  client.on("stream-message", ({ uid, streamId: sid, data }) => {
+  client.on("stream-message", ({ uid, data }) => {
     try {
       const msg = JSON.parse(data);
+
       if (msg.t === 'announce') {
         peers.set(uid, { name: msg.name || String(uid) });
         setPeopleUI();
+        // If I'm host, answer with full state
+        if (iAmHost && currentUrl) {
+          broadcast({ t:'state', url: currentUrl, at: seconds(), playing: isPlaying(), kind: activeKind, hostUid });
+        }
         return;
       }
+
+      if (msg.t === 'hello') {
+        // Newcomer is asking for state; host replies
+        if (iAmHost && currentUrl) {
+          broadcast({ t:'state', url: currentUrl, at: seconds(), playing: isPlaying(), kind: activeKind, hostUid });
+        }
+        return;
+      }
+
       if (msg.t === 'host') {
-        hostUid = msg.uid;
+        hostUid = msg.uid || null;
         iAmHost = (hostUid === myUid);
         setPeopleUI();
         return;
       }
+
+      if (msg.t === 'state' && uid === hostUid) {
+        // Late joiner or resync
+        const { url, at=0, playing=false, kind } = msg;
+        if (!url) return;
+        // Load and align to host
+        handleLoadUrl(url, at, playing);
+        // Do not rebroadcast; handleLoadUrl will only broadcast if iAmHost (false here)
+        return;
+      }
+
+      // Host-driven live controls
       if (uid === hostUid) {
-        if (msg.t === 'load') handleLoadUrl(msg.url, msg.start || 0);
+        if (msg.t === 'load') handleLoadUrl(msg.url, msg.start || msg.at || 0, !!msg.playing);
         if (msg.t === 'play') syncToHost(msg.at || 0, true);
         if (msg.t === 'pause') syncToHost(msg.at || 0, false);
-        if (msg.t === 'seek') syncToHost(msg.at || 0, !html5Video.paused); // try to keep state
+        if (msg.t === 'seek') syncToHost(msg.at || 0, isPlaying());
         if (msg.t === 'ping') broadcast({ t:'pong' });
       }
     } catch (e) {}
@@ -257,11 +312,11 @@ async function join(){
   myUid = first.uid;
   await client.join(APP_ID, channelName, first.token, myUid);
 
-  // Create a reliable, ordered data stream for sync (if available)
+  // Data stream for sync
   try {
     streamId = await client.createDataStream({ reliable: true, ordered: true });
   } catch (e) {
-    console.warn("createDataStream unsupported in this SDK build; sync will be limited.", e);
+    console.warn("createDataStream unsupported; sync will be limited.", e);
   }
 
   // Publish mic (audio call)
@@ -274,12 +329,13 @@ async function join(){
     alert("Microphone access denied or unavailable.");
   }
 
-  // Announce presence (name)
+  // Announce presence (name) and request state
   if (streamId != null) {
     broadcast({ t:'announce', name: displayName });
+    broadcast({ t:'hello' });
   }
 
-  // If no host yet, first taker wins (optional)
+  // If no host yet, first taker wins after a moment
   setTimeout(() => {
     if (!hostUid) { becomeHost(); }
   }, 1000);
@@ -320,11 +376,15 @@ function becomeHost(){
   iAmHost = true;
   broadcast({ t:'host', uid: myUid });
   setPeopleUI();
+  // Immediately push state if we already have a video
+  if (currentUrl) {
+    broadcast({ t:'state', url: currentUrl, at: seconds(), playing: isPlaying(), kind: activeKind, hostUid });
+  }
 }
 function releaseHost(){
   iAmHost = false;
   if (hostUid === myUid) hostUid = null;
-  broadcast({ t:'host', uid: hostUid }); // may be null; someone else can Take Host
+  broadcast({ t:'host', uid: hostUid });
   setPeopleUI();
 }
 
@@ -334,16 +394,23 @@ leaveBtn.addEventListener('click', leave);
 takeHostBtn.addEventListener('click', becomeHost);
 releaseHostBtn.addEventListener('click', releaseHost);
 syncNowBtn.addEventListener('click', () => {
-  // Ask host to ping (will trigger a play/pause shortly after user action anyway)
-  if (hostUid && !iAmHost) broadcast({ t:'ping' });
+  if (hostUid && !iAmHost) broadcast({ t:'hello' }); // ask host to send state
 });
 
 loadBtn.addEventListener('click', () => {
   const url = (urlInput.value || '').trim();
   if (!url) return;
   if (!iAmHost) { alert("Only the Host can load a video. Click 'Take Host' first."); return; }
-  handleLoadUrl(url, 0);
+  handleLoadUrl(url, 0, false);
 });
 
 // ======== Kickoff ========
+// Inject YouTube API tag (in case watch.html didn't already load it)
+(function(){
+  if (!window.YT) {
+    const tag = document.createElement('script');
+    tag.src = "https://www.youtube.com/iframe_api";
+    document.head.appendChild(tag);
+  }
+})();
 join();
