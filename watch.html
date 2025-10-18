@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>PeerApp — Watch Together</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="main.css" />
+  <style>
+    :root { color-scheme: light dark; }
+    body { margin: 0; font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:#0b0f19; color:#e6ebf4; }
+    header { display:flex; gap:12px; align-items:center; padding:12px 16px; background:#111827; border-bottom:1px solid #222b3a; }
+    #logo { font-size:20px }
+    #wrap { display:grid; grid-template-columns: 1fr 320px; gap:16px; padding:16px; }
+    #player-wrap { aspect-ratio:16/9; background:#09101a; border-radius:16px; overflow:hidden; display:grid; place-items:center; }
+    #yt-player, #html5-player { width:100%; height:100%; }
+    #side { display:flex; flex-direction:column; gap:12px; }
+    #link-form { display:flex; gap:8px; }
+    #video-url { flex:1; padding:10px 12px; border-radius:12px; border:1px solid #394b63; background:#0f172a; color:#e6ebf4; }
+    .pill { padding:10px 14px; border-radius:999px; border:1px solid #394b63; background:#1f2937; color:#e6ebf4; cursor:pointer; }
+    .pill.primary { background:#6d28d9; border-color:#6d28d9; }
+    .pill.danger  { background:#ef4444; border-color:#ef4444; }
+    #people { background:#0f172a; border:1px solid #223049; border-radius:16px; padding:12px; min-height:120px; }
+    #controls { display:flex; gap:8px; flex-wrap:wrap; }
+    #net-banner { position:fixed;top:0;left:0;right:0;padding:8px 12px;background:#2b2f3a;color:#ffd863;text-align:center;z-index:9999;font-weight:600 }
+    .muted { opacity:.65 }
+  </style>
+</head>
+<body>
+  <header>
+    <div id="logo">📺</div>
+    <div>
+      <div style="font-weight:700">Watch Together</div>
+      <div id="room-label" style="font-size:12px;opacity:.7"></div>
+    </div>
+    <div style="margin-left:auto;display:flex;gap:8px;">
+      <button id="mic-btn" class="pill" aria-pressed="true" title="Toggle mic (currently ON)">🎙️</button>
+      <button id="leave-btn" class="pill danger" title="Leave">Leave</button>
+    </div>
+  </header>
+
+  <main id="wrap">
+    <section id="player-wrap">
+      <!-- One of these will show depending on the link -->
+      <div id="yt-player"></div>
+      <video id="html5-player" controls playsinline hidden></video>
+    </section>
+
+    <aside id="side">
+      <form id="link-form" onsubmit="return false">
+        <input id="video-url" type="url" placeholder="Paste YouTube link or direct .mp4 URL" autocomplete="off" />
+        <button id="load-btn" class="pill primary" type="button">Load</button>
+      </form>
+
+      <div id="controls">
+        <button id="take-host" class="pill" type="button" title="Become sync host">Take Host</button>
+        <button id="release-host" class="pill" type="button" title="Release host">Release Host</button>
+        <button id="sync-now" class="pill" type="button" title="Force sync to host">Sync to Host</button>
+      </div>
+
+      <div id="people">
+        <div style="font-weight:700;margin-bottom:6px;">Participants</div>
+        <div id="people-list" style="display:flex;flex-direction:column;gap:4px; font-size:14px;"></div>
+      </div>
+
+      <div style="opacity:.7;font-size:12px">
+        Tip: Only the <b>Host</b> controls play/pause/seek. Others follow automatically.
+      </div>
+    </aside>
+  </main>
+
+  <!-- Agora RTC SDK -->
+  <script src="AgoraRTC_N-4.24.0.js"></script>
+  <!-- YouTube IFrame API (loads async via this script) -->
+  <script>
+    // YT inject
+    (function(){
+      const tag = document.createElement('script');
+      tag.src = "https://www.youtube.com/iframe_api";
+      document.head.appendChild(tag);
+    })();
+  </script>
+
+  <script src="watch.js"></script>
+</body>
+</html>

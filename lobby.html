@@ -63,7 +63,11 @@
           <button type="button" id="go-audio" class="btn">
             <span class="btn-emoji">🎙️</span> Audio Call
           </button>
+          <button type="button" id="go-watch" class="btn">
+            <span class="btn-emoji">📺</span> Watch Video Together
+          </button>
         </div>
+        
 
         <p id="hint">Tip: share the same room code with a friend to join together.</p>
         <p id="error" role="alert" aria-live="polite" hidden>Please enter a room code and your name.</p>
@@ -152,6 +156,10 @@
       e.preventDefault();
       go('index.html?room={code}&mode=video', btnVideo);
     });
+    
+    const btnWatch = document.getElementById('go-watch');
+    btnWatch.addEventListener('click', () => go('watch.html?room={code}', btnWatch));
+
   </script>
 </body>
 </html>
