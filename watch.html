@@ -25,13 +25,11 @@
           <div class="placeholder-content">
             <span class="emoji">🎬</span>
             <p>Paste a video URL to start watching together</p>
+            <small>Supports YouTube, Vimeo, and other embeddable videos</small>
           </div>
         </div>
         <div id="video-wrapper" hidden>
-          <iframe id="video-player" width="100%" height="100%" 
-                  frameborder="0" allowfullscreen
-                  allow="autoplay; encrypted-media">
-          </iframe>
+          <div id="video-player"></div>
         </div>
       </div>
       
@@ -45,10 +43,10 @@
         </div>
         <div id="video-info">
           <span id="video-title">No video loaded</span>
-          <span id="video-controls">
-            <button id="play-pause" class="icon-btn" title="Play/Pause">⏯️</button>
+          <div id="video-controls">
+            <button id="play-pause" class="icon-btn" title="Play/Pause" disabled>⏯️</button>
             <button id="sync-video" class="icon-btn" title="Sync with others">🔄</button>
-          </span>
+          </div>
         </div>
       </div>
     </div>

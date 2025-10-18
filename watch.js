@@ -47,57 +47,140 @@ let videoState = {
   title: 'No video loaded'
 };
 
-// ===== Video URL parsing =====
-function extractVideoId(url) {
+// ===== Video URL parsing and embedding =====
+function extractVideoInfo(url) {
   // YouTube
   const ytMatch = url.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/);
-  if (ytMatch) return { type: 'youtube', id: ytMatch[1] };
+  if (ytMatch) {
+    return { 
+      type: 'youtube', 
+      id: ytMatch[1],
+      embedUrl: `https://www.youtube.com/embed/${ytMatch[1]}?enablejsapi=1&autoplay=0&controls=1`
+    };
+  }
   
   // Vimeo
   const vimeoMatch = url.match(/vimeo\.com\/(?:channels\/(?:\w+\/)?|groups\/([^\/]*)\/videos\/|)(\d+)(?:|\/\?)/);
-  if (vimeoMatch) return { type: 'vimeo', id: vimeoMatch[2] };
-  
-  return { type: 'unknown', id: null };
-}
-
-function createEmbedUrl(videoInfo) {
-  if (videoInfo.type === 'youtube') {
-    return `https://www.youtube.com/embed/${videoInfo.id}?enablejsapi=1&origin=${window.location.origin}`;
-  } else if (videoInfo.type === 'vimeo') {
-    return `https://player.vimeo.com/video/${videoInfo.id}`;
+  if (vimeoMatch) {
+    return { 
+      type: 'vimeo', 
+      id: vimeoMatch[2],
+      embedUrl: `https://player.vimeo.com/video/${vimeoMatch[2]}?autoplay=0&controls=1`
+    };
   }
-  return null;
+  
+  // Direct video files
+  if (url.match(/\.(mp4|webm|ogg|mov)(\?.*)?$/i)) {
+    return { 
+      type: 'direct',
+      id: null,
+      embedUrl: url
+    };
+  }
+  
+  return { type: 'unknown', id: null, embedUrl: null };
 }
 
-// ===== Video controls =====
+function createVideoEmbed(videoInfo) {
+  let embedHTML = '';
+  
+  switch (videoInfo.type) {
+    case 'youtube':
+      embedHTML = `
+        <iframe 
+          width="100%" 
+          height="100%" 
+          src="${videoInfo.embedUrl}"
+          frameborder="0" 
+          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
+          allowfullscreen>
+        </iframe>
+      `;
+      break;
+      
+    case 'vimeo':
+      embedHTML = `
+        <iframe 
+          width="100%" 
+          height="100%" 
+          src="${videoInfo.embedUrl}"
+          frameborder="0" 
+          allow="autoplay; fullscreen; picture-in-picture" 
+          allowfullscreen>
+        </iframe>
+      `;
+      break;
+      
+    case 'direct':
+      embedHTML = `
+        <video 
+          width="100%" 
+          height="100%" 
+          controls
+          style="background: #000;">
+          <source src="${videoInfo.embedUrl}" type="video/mp4">
+          Your browser does not support the video tag.
+        </video>
+      `;
+      break;
+      
+    default:
+      throw new Error('Unsupported video platform');
+  }
+  
+  return embedHTML;
+}
+
 function loadVideo(url) {
-  const videoInfo = extractVideoId(url);
-  const embedUrl = createEmbedUrl(videoInfo);
-  
-  if (!embedUrl) {
-    alert('Unsupported video URL. Please use YouTube or Vimeo links.');
-    return;
-  }
-  
-  currentVideoUrl = url;
-  videoPlayer.src = embedUrl;
-  videoPlaceholder.hidden = true;
-  videoWrapper.hidden = false;
-  
-  // Set video title
-  if (videoInfo.type === 'youtube') {
-    videoTitle.textContent = `YouTube Video (${videoInfo.id})`;
-  } else if (videoInfo.type === 'vimeo') {
-    videoTitle.textContent = `Vimeo Video (${videoInfo.id})`;
-  }
-  
-  // Update video state
-  videoState.url = url;
-  videoState.title = videoTitle.textContent;
-  
-  // Broadcast to other participants if host
-  if (isHost) {
-    broadcastVideoState();
+  try {
+    const videoInfo = extractVideoInfo(url);
+    
+    if (!videoInfo.embedUrl) {
+      alert('Unsupported video URL. Please use YouTube, Vimeo, or direct video links.');
+      return;
+    }
+    
+    currentVideoUrl = url;
+    
+    // Create and insert the embed
+    const embedHTML = createVideoEmbed(videoInfo);
+    videoPlayer.innerHTML = embedHTML;
+    
+    // Show video, hide placeholder
+    videoPlaceholder.hidden = true;
+    videoWrapper.hidden = false;
+    
+    // Set video title
+    let title = 'Unknown Video';
+    if (videoInfo.type === 'youtube') {
+      title = `YouTube Video`;
+    } else if (videoInfo.type === 'vimeo') {
+      title = `Vimeo Video`;
+    } else if (videoInfo.type === 'direct') {
+      title = `Video File`;
+    }
+    
+    videoTitle.textContent = title;
+    playPauseBtn.disabled = false;
+    
+    // Update video state
+    videoState = {
+      playing: false,
+      currentTime: 0,
+      url: url,
+      title: title,
+      videoInfo: videoInfo
+    };
+    
+    // Broadcast to other participants if host
+    if (isHost) {
+      broadcastVideoState();
+      addChatMessage('System', `Host loaded a new video: ${title}`, false);
+    }
+    
+  } catch (error) {
+    console.error('Error loading video:', error);
+    alert('Error loading video. Please check the URL and try again.');
   }
 }
 
@@ -105,10 +188,15 @@ function broadcastVideoState() {
   if (!client) return;
   
   try {
-    client.sendStreamMessage({
+    const message = {
       type: 'video-state',
-      data: videoState
-    });
+      data: videoState,
+      timestamp: Date.now(),
+      sender: displayName
+    };
+    
+    client.sendStreamMessage(message);
+    console.log('Broadcast video state:', message);
   } catch (error) {
     console.error('Failed to broadcast video state:', error);
   }
@@ -118,10 +206,16 @@ function syncVideoWithHost() {
   if (isHost) return;
   
   try {
-    client.sendStreamMessage({
+    const message = {
       type: 'sync-request',
-      data: { requester: displayName }
-    });
+      data: { 
+        requester: displayName,
+        currentTime: videoState.currentTime
+      }
+    };
+    
+    client.sendStreamMessage(message);
+    addChatMessage('System', 'Requested video sync with host', true);
   } catch (error) {
     console.error('Failed to send sync request:', error);
   }
@@ -129,15 +223,17 @@ function syncVideoWithHost() {
 
 // ===== UI Updates =====
 function updateParticipantsList() {
+  if (!participantsList) return;
+  
   participantsList.innerHTML = '';
   
-  // Add local participant
+  // Add local participant (You)
   const localParticipant = document.createElement('div');
   localParticipant.className = 'participant';
   localParticipant.innerHTML = `
     <div class="participant-avatar">${displayName.charAt(0).toUpperCase()}</div>
-    <div class="participant-name">${displayName} (You)</div>
-    <div class="participant-mic">${localTracks.audio ? '🎤' : '🔇'}</div>
+    <div class="participant-name">${displayName} (You) ${isHost ? '👑' : ''}</div>
+    <div class="participant-mic">${localTracks.audio && micOn ? '🎤' : '🔇'}</div>
   `;
   participantsList.appendChild(localParticipant);
   
@@ -147,7 +243,7 @@ function updateParticipantsList() {
     participant.className = 'participant';
     participant.innerHTML = `
       <div class="participant-avatar">${String(uid).charAt(0).toUpperCase()}</div>
-      <div class="participant-name">${user.displayName || uid}</div>
+      <div class="participant-name">${user.displayName || `User ${uid}`}</div>
       <div class="participant-mic">${user.hasAudio ? '🎤' : '🔇'}</div>
     `;
     participantsList.appendChild(participant);
@@ -155,10 +251,12 @@ function updateParticipantsList() {
 }
 
 function addChatMessage(sender, message, isOwn = false) {
+  if (!chatMessages) return;
+  
   const messageEl = document.createElement('div');
   messageEl.className = `chat-message ${isOwn ? 'own' : ''}`;
   messageEl.innerHTML = `
-    <div class="message-sender">${sender}</div>
+    <div class="message-sender">${sender} ${isOwn ? '(You)' : ''}</div>
     <div class="message-content">${message}</div>
   `;
   chatMessages.appendChild(messageEl);
@@ -182,7 +280,7 @@ async function fetchRtcToken({ channel }) {
   return data;
 }
 
-function tokenUrl(path){
+function tokenUrl(path) {
   const base = TOKEN_API_BASE.replace(/\/$/, "");
   const p = String(path || "").replace(/^\//, "");
   return `${base}/${p}`;
@@ -198,6 +296,7 @@ async function toggleMic() {
     await track.setMuted(micOn);
     micOn = !micOn;
     updateMicUI();
+    updateParticipantsList();
   } catch (error) {
     console.error('Toggle mic failed:', error);
   }
@@ -237,6 +336,9 @@ async function init() {
     // Create client
     client = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
     
+    // Set up event listeners first
+    setupEventListeners();
+    
     // Fetch token and join
     const tokenData = await fetchRtcToken({ channel: channelName });
     await client.join(APP_ID, channelName, tokenData.token, tokenData.uid);
@@ -245,10 +347,15 @@ async function init() {
     isHost = client.remoteUsers.length === 0;
     
     // Create and publish audio track
-    localTracks.audio = await AgoraRTC.createMicrophoneAudioTrack({
-      AEC: true, ANS: true, AGC: true
-    });
-    await client.publish([localTracks.audio]);
+    try {
+      localTracks.audio = await AgoraRTC.createMicrophoneAudioTrack({
+        AEC: true, ANS: true, AGC: true
+      });
+      await client.publish([localTracks.audio]);
+    } catch (audioError) {
+      console.warn('Microphone access denied, continuing without audio:', audioError);
+      addChatMessage('System', 'Microphone access denied - you can still watch and chat', false);
+    }
     
     micOn = true;
     updateMicUI();
@@ -259,11 +366,11 @@ async function init() {
       client.enableAudioVolumeIndicator();
     }
     
-    // Set up event listeners
-    setupEventListeners();
-    
     // Show success message
-    addChatMessage('System', `Joined room "${roomId}" as ${isHost ? 'host' : 'participant'}`, false);
+    addChatMessage('System', `Joined room "${roomId}" as ${isHost ? 'host 👑' : 'participant'}`, false);
+    if (isHost) {
+      addChatMessage('System', 'You are the host - you can load videos for everyone', false);
+    }
     
   } catch (error) {
     console.error('Initialization failed:', error);
@@ -278,6 +385,9 @@ function setupEventListeners() {
     const url = videoUrlInput.value.trim();
     if (url) {
       loadVideo(url);
+      videoUrlInput.value = '';
+    } else {
+      alert('Please enter a video URL');
     }
   });
   
@@ -288,12 +398,9 @@ function setupEventListeners() {
   });
   
   playPauseBtn.addEventListener('click', () => {
-    // This would need YouTube/Video API integration for actual control
-    // For now, just broadcast the intent
-    if (isHost) {
-      videoState.playing = !videoState.playing;
-      broadcastVideoState();
-    }
+    // For now, just log - in a real implementation you'd control the video via APIs
+    console.log('Play/Pause clicked');
+    addChatMessage('System', 'Use the video player controls directly', true);
   });
   
   syncBtn.addEventListener('click', syncVideoWithHost);
@@ -313,6 +420,7 @@ function setupEventListeners() {
   // Agora events
   client.on("user-published", async (user, mediaType) => {
     await client.subscribe(user, mediaType);
+    
     remoteUsers.set(user.uid, {
       ...user,
       displayName: `User ${user.uid}`,
@@ -320,7 +428,11 @@ function setupEventListeners() {
     });
     
     if (mediaType === "audio") {
-      user.audioTrack.play();
+      try {
+        user.audioTrack.play();
+      } catch (error) {
+        console.warn('Could not play remote audio:', error);
+      }
     }
     
     updateParticipantsList();
@@ -351,22 +463,18 @@ function setupEventListeners() {
       switch (message.type) {
         case 'video-state':
           if (!isHost) {
-            videoState = message.data;
-            if (videoState.url && videoState.url !== currentVideoUrl) {
-              loadVideo(videoState.url);
-            }
-            videoTitle.textContent = videoState.title;
+            handleRemoteVideoState(message);
           }
           break;
           
         case 'chat-message':
-          addChatMessage(message.sender, message.text, false);
+          addChatMessage(message.data.sender, message.data.text, false);
           break;
           
         case 'sync-request':
           if (isHost) {
             broadcastVideoState();
-            addChatMessage('System', `${message.data.requester} requested sync`, false);
+            addChatMessage('System', `${message.data.requester} requested video sync`, false);
           }
           break;
       }
@@ -376,19 +484,32 @@ function setupEventListeners() {
   });
 }
 
+function handleRemoteVideoState(message) {
+  if (message.data.url !== currentVideoUrl) {
+    // Load the new video
+    loadVideo(message.data.url);
+  }
+  videoState = message.data;
+  videoTitle.textContent = message.data.title;
+  
+  addChatMessage('System', `Host updated the video: ${message.data.title}`, false);
+}
+
 function sendMessage() {
   const text = messageInput.value.trim();
   if (!text || !client) return;
   
   try {
-    client.sendStreamMessage({
+    const message = {
       type: 'chat-message',
       data: {
         sender: displayName,
-        text: text
+        text: text,
+        timestamp: Date.now()
       }
-    });
+    };
     
+    client.sendStreamMessage(message);
     addChatMessage(displayName, text, true);
     messageInput.value = '';
   } catch (error) {
@@ -405,3 +526,6 @@ function sendMessage() {
     window.location = "lobby.html";
   }
 })();
+
+// Handle page unload
+window.addEventListener('beforeunload', leave);
