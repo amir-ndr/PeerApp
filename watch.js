@@ -25,7 +25,6 @@ const videoPlaceholder = document.getElementById('video-placeholder');
 const videoWrapper = document.getElementById('video-wrapper');
 const videoPlayer = document.getElementById('video-player');
 const videoTitle = document.getElementById('video-title');
-const playPauseBtn = document.getElementById('play-pause');
 const syncBtn = document.getElementById('sync-video');
 const participantsList = document.getElementById('participants-list');
 const chatMessages = document.getElementById('chat-messages');
@@ -43,96 +42,84 @@ let isHost = false;
 let micOn = true;
 let dataStream = null;
 
-// ===== Video URL parsing and embedding =====
+// ===== Video URL parsing =====
 function extractVideoInfo(url) {
-  // YouTube
-  const ytMatch = url.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/);
-  if (ytMatch) {
-    return { 
-      type: 'youtube', 
-      id: ytMatch[1],
-      embedUrl: `https://www.youtube.com/embed/${ytMatch[1]}?enablejsapi=1&autoplay=0&controls=1`
-    };
+  console.log("Parsing URL:", url);
+  
+  // YouTube - handle multiple formats
+  const ytRegexes = [
+    /(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&?\s]+)/,
+    /youtube\.com\/embed\/([^&?\s]+)/,
+    /youtube\.com\/v\/([^&?\s]+)/
+  ];
+  
+  for (const regex of ytRegexes) {
+    const match = url.match(regex);
+    if (match && match[1]) {
+      const videoId = match[1].split('?')[0].split('&')[0];
+      return {
+        type: 'youtube',
+        id: videoId,
+        embedUrl: `https://www.youtube.com/embed/${videoId}?autoplay=1&controls=1`
+      };
+    }
   }
   
   // Vimeo
-  const vimeoMatch = url.match(/vimeo\.com\/(?:channels\/(?:\w+\/)?|groups\/([^\/]*)\/videos\/|)(\d+)(?:|\/\?)/);
+  const vimeoMatch = url.match(/vimeo\.com\/(?:channels\/\w+\/)?(\d+)/);
   if (vimeoMatch) {
-    return { 
-      type: 'vimeo', 
-      id: vimeoMatch[2],
-      embedUrl: `https://player.vimeo.com/video/${vimeoMatch[2]}?autoplay=0&controls=1`
+    return {
+      type: 'vimeo',
+      id: vimeoMatch[1],
+      embedUrl: `https://player.vimeo.com/video/${vimeoMatch[1]}?autoplay=1&controls=1`
     };
   }
   
-  // Direct video files
-  if (url.match(/\.(mp4|webm|ogg|mov)(\?.*)?$/i)) {
-    return { 
-      type: 'direct',
-      id: null,
-      embedUrl: url
-    };
-  }
-  
+  console.log("URL not recognized as YouTube or Vimeo");
   return { type: 'unknown', id: null, embedUrl: null };
 }
 
 function createVideoEmbed(videoInfo) {
-  let embedHTML = '';
+  console.log("Creating embed for:", videoInfo);
   
-  switch (videoInfo.type) {
-    case 'youtube':
-      embedHTML = `
-        <iframe 
-          width="100%" 
-          height="100%" 
-          src="${videoInfo.embedUrl}"
-          frameborder="0" 
-          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
-          allowfullscreen>
-        </iframe>
-      `;
-      break;
-      
-    case 'vimeo':
-      embedHTML = `
-        <iframe 
-          width="100%" 
-          height="100%" 
-          src="${videoInfo.embedUrl}"
-          frameborder="0" 
-          allow="autoplay; fullscreen; picture-in-picture" 
-          allowfullscreen>
-        </iframe>
-      `;
-      break;
-      
-    case 'direct':
-      embedHTML = `
-        <video 
-          width="100%" 
-          height="100%" 
-          controls
-          style="background: #000;">
-          <source src="${videoInfo.embedUrl}" type="video/mp4">
-          Your browser does not support the video tag.
-        </video>
-      `;
-      break;
-      
-    default:
-      throw new Error('Unsupported video platform');
+  if (videoInfo.type === 'youtube') {
+    return `
+      <iframe 
+        width="100%" 
+        height="100%" 
+        src="${videoInfo.embedUrl}"
+        frameborder="0" 
+        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
+        allowfullscreen
+        style="border: none;">
+      </iframe>
+    `;
+  } else if (videoInfo.type === 'vimeo') {
+    return `
+      <iframe 
+        width="100%" 
+        height="100%" 
+        src="${videoInfo.embedUrl}"
+        frameborder="0" 
+        allow="autoplay; fullscreen; picture-in-picture" 
+        allowfullscreen
+        style="border: none;">
+      </iframe>
+    `;
   }
   
-  return embedHTML;
+  throw new Error('Unsupported video platform');
 }
 
 function loadVideo(url) {
+  console.log("Loading video:", url);
+  
   try {
     const videoInfo = extractVideoInfo(url);
+    console.log("Video info:", videoInfo);
     
     if (!videoInfo.embedUrl) {
-      alert('Unsupported video URL. Please use YouTube, Vimeo, or direct video links.');
+      alert('Please use a valid YouTube or Vimeo URL.\n\nExamples:\nYouTube: https://www.youtube.com/watch?v=VIDEO_ID\nVimeo: https://vimeo.com/VIDEO_ID');
       return;
     }
     
@@ -147,39 +134,28 @@ function loadVideo(url) {
     videoWrapper.hidden = false;
     
     // Set video title
-    let title = 'Unknown Video';
-    if (videoInfo.type === 'youtube') {
-      title = `YouTube Video`;
-    } else if (videoInfo.type === 'vimeo') {
-      title = `Vimeo Video`;
-    } else if (videoInfo.type === 'direct') {
-      title = `Video File`;
-    }
-    
+    let title = videoInfo.type === 'youtube' ? 'YouTube Video' : 'Vimeo Video';
     videoTitle.textContent = title;
-    playPauseBtn.disabled = false;
-    
-    // Update video state
-    const videoState = {
-      type: 'video-state',
-      playing: false,
-      currentTime: 0,
-      url: url,
-      title: title,
-      videoInfo: videoInfo,
-      timestamp: Date.now(),
-      sender: displayName
-    };
     
     // Broadcast to other participants if host
     if (isHost && dataStream) {
-      sendDataMessage(videoState);
-      addChatMessage('System', `Host loaded a new video: ${title}`, false);
+      const message = {
+        type: 'video-state',
+        url: url,
+        title: title,
+        videoInfo: videoInfo,
+        timestamp: Date.now(),
+        sender: displayName
+      };
+      sendDataMessage(message);
+      addChatMessage('System', `Host loaded a new ${videoInfo.type} video`, false);
     }
+    
+    console.log("Video loaded successfully");
     
   } catch (error) {
     console.error('Error loading video:', error);
-    alert('Error loading video. Please check the URL and try again.');
+    alert('Error loading video. Please check the URL and try again.\n\nMake sure you are using a valid YouTube or Vimeo URL.');
   }
 }
 
@@ -202,6 +178,7 @@ function sendDataMessage(message) {
 function handleDataMessage(message) {
   try {
     const data = JSON.parse(message);
+    console.log('Received data message:', data.type);
     
     switch (data.type) {
       case 'video-state':
@@ -215,7 +192,7 @@ function handleDataMessage(message) {
         break;
         
       case 'sync-request':
-        if (isHost) {
+        if (isHost && currentVideoUrl) {
           // Re-broadcast current video state
           const videoState = {
             type: 'video-state',
@@ -235,13 +212,15 @@ function handleDataMessage(message) {
 }
 
 function syncVideoWithHost() {
-  if (isHost) return;
+  if (isHost) {
+    addChatMessage('System', 'You are the host - others sync with you', true);
+    return;
+  }
   
   try {
     const message = {
       type: 'sync-request',
       requester: displayName,
-      currentTime: 0,
       timestamp: Date.now()
     };
     
@@ -253,12 +232,12 @@ function syncVideoWithHost() {
 }
 
 function handleRemoteVideoState(data) {
+  console.log('Handling remote video state:', data);
   if (data.url && data.url !== currentVideoUrl) {
     // Load the new video
     loadVideo(data.url);
   }
   videoTitle.textContent = data.title;
-  addChatMessage('System', `Host updated the video: ${data.title}`, false);
 }
 
 // ===== UI Updates =====
@@ -327,11 +306,10 @@ function tokenUrl(path) {
 }
 
 async function toggleMic() {
-  const track = localTracks.audio;
-  if (!track) return;
+  if (!localTracks.audio) return;
 
   try {
-    await track.setMuted(micOn);
+    await localTracks.audio.setMuted(micOn);
     micOn = !micOn;
     updateMicUI();
     updateParticipantsList();
@@ -374,6 +352,8 @@ async function init() {
   window.__watchInit = true;
   
   try {
+    console.log("Initializing watch room...");
+    
     // Create client
     client = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
     
@@ -386,10 +366,11 @@ async function init() {
     
     // Determine if host (first user in room)
     isHost = client.remoteUsers.length === 0;
+    console.log("Is host:", isHost);
     
     // Create data stream
     try {
-      dataStream = await AgoraRTC.createDataStream({
+      dataStream = await client.createDataStream({
         ordered: true,
         reliable: true
       });
@@ -404,6 +385,7 @@ async function init() {
         AEC: true, ANS: true, AGC: true
       });
       await client.publish([localTracks.audio]);
+      console.log('Audio track published');
     } catch (audioError) {
       console.warn('Microphone access denied, continuing without audio:', audioError);
       addChatMessage('System', 'Microphone access denied - you can still watch and chat', false);
@@ -419,6 +401,8 @@ async function init() {
       addChatMessage('System', 'You are the host - you can load videos for everyone', false);
     }
     
+    console.log("Watch room initialized successfully");
+    
   } catch (error) {
     console.error('Initialization failed:', error);
     alert('Failed to join room. Please try again.');
@@ -427,6 +411,8 @@ async function init() {
 }
 
 function setupEventListeners() {
+  console.log("Setting up event listeners...");
+  
   // Video controls
   loadVideoBtn.addEventListener('click', () => {
     const url = videoUrlInput.value.trim();
@@ -442,12 +428,6 @@ function setupEventListeners() {
     if (e.key === 'Enter') {
       loadVideoBtn.click();
     }
-  });
-  
-  playPauseBtn.addEventListener('click', () => {
-    // For now, just log - in a real implementation you'd control the video via APIs
-    console.log('Play/Pause clicked');
-    addChatMessage('System', 'Use the video player controls directly', true);
   });
   
   syncBtn.addEventListener('click', syncVideoWithHost);
@@ -466,6 +446,7 @@ function setupEventListeners() {
   
   // Agora events
   client.on("user-published", async (user, mediaType) => {
+    console.log("User published:", user.uid, mediaType);
     await client.subscribe(user, mediaType);
     
     remoteUsers.set(user.uid, {
@@ -487,6 +468,7 @@ function setupEventListeners() {
   });
   
   client.on("user-unpublished", (user, mediaType) => {
+    console.log("User unpublished:", user.uid, mediaType);
     if (mediaType === "audio") {
       const remoteUser = remoteUsers.get(user.uid);
       if (remoteUser) {
@@ -497,6 +479,7 @@ function setupEventListeners() {
   });
   
   client.on("user-left", (user) => {
+    console.log("User left:", user.uid);
     remoteUsers.delete(user.uid);
     updateParticipantsList();
     addChatMessage('System', `User ${user.uid} left the room`, false);
@@ -531,6 +514,7 @@ function sendMessage() {
 }
 
 // Start initialization
+console.log("Starting watch initialization...");
 (async () => {
   try {
     await init();
