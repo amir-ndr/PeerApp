@@ -52,6 +52,9 @@ let currentUrl = "";
 // Prevent echo loops when programmatic changes fire events
 let suppressNextEvent = false;
 
+// Periodic sync interval
+let syncInterval = null;
+
 // ======== Helpers ========
 function tokenUrl(path){
   const base = TOKEN_API_BASE.replace(/\/$/, "");
@@ -165,8 +168,15 @@ function loadYouTube(id, start=0, autoPlay=false){
         onStateChange: (e) => {
           if (!iAmHost) return;
           if (suppressNextEvent) { suppressNextEvent = false; return; }
-          if (e.data === 1) broadcast({ t:'play', at: ytPlayer.getCurrentTime() });
-          if (e.data === 2) broadcast({ t:'pause', at: ytPlayer.getCurrentTime() });
+          
+          // YouTube player states: -1 (unstarted), 0 (ended), 1 (playing), 2 (paused), 3 (buffering), 5 (video cued)
+          if (e.data === 1) { // Playing
+            broadcast({ t:'play', at: ytPlayer.getCurrentTime() });
+          } else if (e.data === 2) { // Paused
+            broadcast({ t:'pause', at: ytPlayer.getCurrentTime() });
+          } else if (e.data === 0) { // Ended
+            broadcast({ t:'pause', at: ytPlayer.getCurrentTime() });
+          }
         }
       }
     });
@@ -181,9 +191,40 @@ function loadYouTube(id, start=0, autoPlay=false){
 }
 
 function attachHtml5Handlers(){
-  html5Video.onplay = () => { if (iAmHost && !suppressNextEvent) broadcast({ t:'play', at: html5Video.currentTime }); suppressNextEvent = false; };
-  html5Video.onpause = () => { if (iAmHost && !suppressNextEvent) broadcast({ t:'pause', at: html5Video.currentTime }); suppressNextEvent = false; };
-  html5Video.onseeked = () => { if (iAmHost && !suppressNextEvent) broadcast({ t:'seek', at: html5Video.currentTime }); suppressNextEvent = false; };
+  html5Video.onplay = () => { 
+    if (iAmHost && !suppressNextEvent) {
+      broadcast({ t:'play', at: html5Video.currentTime }); 
+      suppressNextEvent = false;
+    }
+  };
+  
+  html5Video.onpause = () => { 
+    if (iAmHost && !suppressNextEvent) {
+      broadcast({ t:'pause', at: html5Video.currentTime }); 
+      suppressNextEvent = false;
+    }
+  };
+  
+  html5Video.onseeked = () => { 
+    if (iAmHost && !suppressNextEvent) {
+      broadcast({ t:'seek', at: html5Video.currentTime }); 
+      suppressNextEvent = false;
+    }
+  };
+  
+  html5Video.onended = () => { 
+    if (iAmHost && !suppressNextEvent) {
+      broadcast({ t:'pause', at: html5Video.currentTime }); 
+      suppressNextEvent = false;
+    }
+  };
+  
+  // Add seeking event for better sync during seeking
+  html5Video.onseeking = () => {
+    if (iAmHost && !suppressNextEvent) {
+      broadcast({ t:'seeking', at: html5Video.currentTime }); 
+    }
+  };
 }
 
 function loadHtml5(url, start=0, autoPlay=false){
@@ -215,13 +256,41 @@ function handleLoadUrl(url, start=0, autoPlay=false){
 
 function syncToHost(at, playing){
   suppressNextEvent = true;
+  
   if (activeKind === 'youtube' && ytPlayer) {
-    ytPlayer.seekTo(at, true);
-    if (playing) ytPlayer.playVideo(); else ytPlayer.pauseVideo();
+    const currentTime = ytPlayer.getCurrentTime();
+    const timeDiff = Math.abs(currentTime - at);
+    
+    // Only seek if the time difference is significant (more than 0.5 seconds)
+    if (timeDiff > 0.5) {
+      ytPlayer.seekTo(at, true);
+    }
+    
+    if (playing) {
+      ytPlayer.playVideo();
+    } else {
+      ytPlayer.pauseVideo();
+    }
   } else if (activeKind === 'html5' && html5Video) {
-    html5Video.currentTime = at;
-    if (playing) html5Video.play().catch(()=>{}); else html5Video.pause();
+    const currentTime = html5Video.currentTime;
+    const timeDiff = Math.abs(currentTime - at);
+    
+    // Only seek if the time difference is significant (more than 0.5 seconds)
+    if (timeDiff > 0.5) {
+      html5Video.currentTime = at;
+    }
+    
+    if (playing) {
+      html5Video.play().catch(e => console.error("Error playing video:", e));
+    } else {
+      html5Video.pause();
+    }
   }
+  
+  // Reset suppressNextEvent after a short delay
+  setTimeout(() => {
+    suppressNextEvent = false;
+  }, 100);
 }
 
 // ======== RTC join (audio + data stream) ========
@@ -253,7 +322,15 @@ async function join(){
 
   client.on("user-left", (user) => {
     peers.delete(user.uid);
-    if (user.uid === hostUid) { hostUid = null; iAmHost = false; }
+    if (user.uid === hostUid) { 
+      hostUid = null; 
+      iAmHost = false;
+      // Stop periodic sync if we were the host
+      if (syncInterval) {
+        clearInterval(syncInterval);
+        syncInterval = null;
+      }
+    }
     setPeopleUI();
   });
 
@@ -283,6 +360,12 @@ async function join(){
         hostUid = msg.uid || null;
         iAmHost = (hostUid === myUid);
         setPeopleUI();
+        // If I'm not the host, request current state
+        if (!iAmHost && hostUid) {
+          setTimeout(() => {
+            broadcast({ t:'hello' });
+          }, 500);
+        }
         return;
       }
 
@@ -301,10 +384,12 @@ async function join(){
         if (msg.t === 'load') handleLoadUrl(msg.url, msg.start || msg.at || 0, !!msg.playing);
         if (msg.t === 'play') syncToHost(msg.at || 0, true);
         if (msg.t === 'pause') syncToHost(msg.at || 0, false);
-        if (msg.t === 'seek') syncToHost(msg.at || 0, isPlaying());
+        if (msg.t === 'seek' || msg.t === 'seeking') syncToHost(msg.at || 0, isPlaying());
         if (msg.t === 'ping') broadcast({ t:'pong' });
       }
-    } catch (e) {}
+    } catch (e) {
+      console.error("Error processing stream message:", e);
+    }
   });
 
   // Join
@@ -337,7 +422,9 @@ async function join(){
 
   // If no host yet, first taker wins after a moment
   setTimeout(() => {
-    if (!hostUid) { becomeHost(); }
+    if (!hostUid) { 
+      becomeHost(); 
+    }
   }, 1000);
 }
 
@@ -371,6 +458,23 @@ async function leave(){
 }
 
 // ======== Host controls ========
+function startPeriodicSync() {
+  if (syncInterval) clearInterval(syncInterval);
+  
+  syncInterval = setInterval(() => {
+    if (iAmHost && currentUrl) {
+      broadcast({ 
+        t:'state', 
+        url: currentUrl, 
+        at: seconds(), 
+        playing: isPlaying(), 
+        kind: activeKind, 
+        hostUid 
+      });
+    }
+  }, 5000); // Sync every 5 seconds
+}
+
 function becomeHost(){
   hostUid = myUid;
   iAmHost = true;
@@ -380,12 +484,24 @@ function becomeHost(){
   if (currentUrl) {
     broadcast({ t:'state', url: currentUrl, at: seconds(), playing: isPlaying(), kind: activeKind, hostUid });
   }
+  // Start periodic sync
+  startPeriodicSync();
+  // Also request current state from all clients to ensure we're in sync
+  setTimeout(() => {
+    broadcast({ t:'ping' });
+  }, 500);
 }
+
 function releaseHost(){
   iAmHost = false;
   if (hostUid === myUid) hostUid = null;
   broadcast({ t:'host', uid: hostUid });
   setPeopleUI();
+  // Stop periodic sync
+  if (syncInterval) {
+    clearInterval(syncInterval);
+    syncInterval = null;
+  }
 }
 
 // ======== Wire UI ========
@@ -394,7 +510,14 @@ leaveBtn.addEventListener('click', leave);
 takeHostBtn.addEventListener('click', becomeHost);
 releaseHostBtn.addEventListener('click', releaseHost);
 syncNowBtn.addEventListener('click', () => {
-  if (hostUid && !iAmHost) broadcast({ t:'hello' }); // ask host to send state
+  if (hostUid && !iAmHost) {
+    broadcast({ t:'hello' }); // ask host to send state
+    // Provide visual feedback
+    syncNowBtn.textContent = "Syncing...";
+    setTimeout(() => {
+      syncNowBtn.textContent = "Sync to Host";
+    }, 2000);
+  }
 });
 
 loadBtn.addEventListener('click', () => {
