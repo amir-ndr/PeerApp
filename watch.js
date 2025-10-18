@@ -43,21 +43,110 @@ let isHost = false;
 let micOn = true;
 let dataStream = null;
 let isInitialized = false;
+let dataStreamEnabled = false;
+
+// ===== Token Fallback =====
+async function fetchRtcTokenWithFallback({ channel, maxRetries = 2 }) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const tokenUrl = `${TOKEN_API_BASE.replace(/\/$/, "")}/token`;
+      console.log(`Fetching token from: ${tokenUrl} (attempt ${attempt})`);
+      
+      const res = await fetch(tokenUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(ROOM_PASSWORD ? { "x-room-password": ROOM_PASSWORD } : {})
+        },
+        body: JSON.stringify({ type: "rtc", channel })
+      });
+      
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      }
+      
+      const data = await res.json();
+      if (!data?.token || typeof data?.uid !== "number") {
+        throw new Error("Invalid token response format");
+      }
+      
+      console.log("Token fetched successfully");
+      return data;
+      
+    } catch (error) {
+      console.warn(`Token fetch attempt ${attempt} failed:`, error);
+      
+      if (attempt === maxRetries) {
+        // Final fallback: Use null token (works for testing/development)
+        console.warn("Using null token as fallback");
+        return { token: null, uid: 0 };
+      }
+      
+      // Wait before retry
+      await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+    }
+  }
+}
 
 // ===== Data Stream Utilities =====
-async function waitForDataStream(maxWaitTime = 5000) {
-  const startTime = Date.now();
-  while (!dataStream && (Date.now() - startTime) < maxWaitTime) {
-    await new Promise(resolve => setTimeout(resolve, 100));
+async function initializeDataStream(maxRetries = 3) {
+  if (!client) {
+    console.error("Client not initialized for data stream");
+    return false;
   }
-  if (!dataStream) {
-    throw new Error('Data stream not available after waiting');
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`Creating data stream (attempt ${attempt})...`);
+      
+      dataStream = await client.createDataStream({
+        ordered: true,
+        reliable: false, // Changed to false for better compatibility
+        retry: true
+      });
+      
+      // Set up message handler
+      dataStream.on("message", (message) => {
+        handleDataMessage(message);
+      });
+      
+      dataStream.on("error", (error) => {
+        console.error("Data stream error:", error);
+        dataStreamEnabled = false;
+      });
+      
+      dataStreamEnabled = true;
+      console.log('Data stream created successfully');
+      return true;
+      
+    } catch (error) {
+      console.warn(`Data stream creation failed (attempt ${attempt}):`, error);
+      
+      if (attempt === maxRetries) {
+        console.error("Data stream creation failed after all retries");
+        dataStreamEnabled = false;
+        return false;
+      }
+      
+      // Wait before retry
+      await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+    }
   }
-  return dataStream;
 }
 
 function isDataStreamReady() {
-  return dataStream && dataStream.sendData;
+  return dataStreamEnabled && dataStream && typeof dataStream.sendData === 'function';
+}
+
+async function waitForDataStream(maxWaitTime = 3000) {
+  const startTime = Date.now();
+  while (!isDataStreamReady() && (Date.now() - startTime) < maxWaitTime) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  if (!isDataStreamReady()) {
+    throw new Error('Data stream not available after waiting');
+  }
+  return true;
 }
 
 // ===== Video URL parsing =====
@@ -136,6 +225,7 @@ async function loadVideo(url) {
   
   // Show loading state
   loadVideoBtn.disabled = true;
+  const originalText = loadVideoBtn.textContent;
   loadVideoBtn.textContent = 'Loading...';
   
   try {
@@ -172,49 +262,41 @@ async function loadVideo(url) {
   } catch (error) {
     console.error('Error loading video:', error);
     addChatMessage('System', `Error loading video: ${error.message}`, false);
-    alert('Error loading video. Please check the URL and try again.\n\nMake sure you are using a valid YouTube or Vimeo URL.');
+    alert('Error loading video. Please check the URL and try again.');
   } finally {
     loadVideoBtn.disabled = false;
-    loadVideoBtn.textContent = 'Load Video';
+    loadVideoBtn.textContent = originalText;
   }
 }
 
-async function broadcastVideoState(url, title, videoInfo, maxRetries = 3) {
+async function broadcastVideoState(url, title, videoInfo, maxRetries = 2) {
   if (!isHost) return;
   
   try {
-    await waitForDataStream();
-    
-    let retries = 0;
-    const sendWithRetry = async () => {
-      try {
-        const message = {
-          type: 'video-state',
-          url: url,
-          title: title,
-          videoInfo: videoInfo,
-          timestamp: Date.now(),
-          sender: displayName
-        };
-        sendDataMessage(message);
+    // Try to use data stream if available
+    if (await initializeDataStream(1)) { // Quick retry
+      const message = {
+        type: 'video-state',
+        url: url,
+        title: title,
+        videoInfo: videoInfo,
+        timestamp: Date.now(),
+        sender: displayName
+      };
+      
+      if (sendDataMessage(message)) {
         addChatMessage('System', `Host loaded a new ${videoInfo.type} video`, false);
         console.log('Video state broadcast successfully');
-      } catch (error) {
-        retries++;
-        if (retries <= maxRetries) {
-          console.warn(`Retrying video state broadcast (${retries}/${maxRetries})...`);
-          await new Promise(resolve => setTimeout(resolve, 500 * retries));
-          return sendWithRetry();
-        } else {
-          throw new Error(`Failed to broadcast video after ${maxRetries} attempts`);
-        }
+        return;
       }
-    };
+    }
     
-    await sendWithRetry();
+    // Fallback: Inform users they need to load manually
+    addChatMessage('System', `Host loaded a ${videoInfo.type} video. Other users may need to load it manually.`, false);
+    
   } catch (error) {
     console.error('Failed to broadcast video state:', error);
-    addChatMessage('System', 'Warning: Could not sync video with all participants', false);
+    addChatMessage('System', 'Note: Video loaded but sync with others may not work', false);
   }
 }
 
@@ -232,6 +314,7 @@ function sendDataMessage(message) {
     return true;
   } catch (error) {
     console.error('Failed to send data message:', error);
+    dataStreamEnabled = false;
     return false;
   }
 }
@@ -257,10 +340,6 @@ function handleDataMessage(message) {
           handleSyncRequest(data);
         }
         break;
-        
-      case 'user-joined':
-        updateParticipantsList();
-        break;
     }
   } catch (error) {
     console.error('Error processing data message:', error);
@@ -268,8 +347,7 @@ function handleDataMessage(message) {
 }
 
 function handleSyncRequest(data) {
-  // Re-broadcast current video state to the requester
-  if (currentVideoUrl && currentVideoInfo) {
+  if (currentVideoUrl && currentVideoInfo && isDataStreamReady()) {
     const videoState = {
       type: 'video-state',
       url: currentVideoUrl,
@@ -279,23 +357,22 @@ function handleSyncRequest(data) {
       sender: displayName,
       isSyncResponse: true
     };
-    sendDataMessage(videoState);
-    addChatMessage('System', `${data.requester} requested video sync`, false);
+    
+    if (sendDataMessage(videoState)) {
+      addChatMessage('System', `${data.requester} requested video sync`, false);
+    }
   }
 }
 
 function handleRemoteVideoState(data) {
   console.log('Handling remote video state:', data);
   
-  // Prevent infinite loop if this is our own message
   if (data.sender === displayName) return;
   
   if (data.url && data.url !== currentVideoUrl) {
-    // Load the new video
     loadVideo(data.url);
   }
   
-  // Update video metadata
   if (data.title) {
     videoTitle.textContent = data.title;
   }
@@ -314,6 +391,11 @@ function syncVideoWithHost() {
     return;
   }
   
+  if (!isDataStreamReady()) {
+    addChatMessage('System', 'Sync not available - data connection issue', true);
+    return;
+  }
+  
   try {
     const message = {
       type: 'sync-request',
@@ -324,7 +406,7 @@ function syncVideoWithHost() {
     if (sendDataMessage(message)) {
       addChatMessage('System', 'Requested video sync with host', true);
     } else {
-      addChatMessage('System', 'Failed to send sync request - try again', true);
+      addChatMessage('System', 'Failed to send sync request', true);
     }
   } catch (error) {
     console.error('Failed to send sync request:', error);
@@ -345,6 +427,7 @@ function updateParticipantsList() {
     <div class="participant-avatar">${displayName.charAt(0).toUpperCase()}</div>
     <div class="participant-name">${displayName} (You) ${isHost ? '👑' : ''}</div>
     <div class="participant-mic">${localTracks.audio && micOn ? '🎤' : '🔇'}</div>
+    <div class="participant-data">${dataStreamEnabled ? '📡' : '❌'}</div>
   `;
   participantsList.appendChild(localParticipant);
   
@@ -375,28 +458,6 @@ function addChatMessage(sender, message, isOwn = false) {
 }
 
 // ===== Agora RTC =====
-async function fetchRtcToken({ channel }) {
-  const res = await fetch(tokenUrl("token"), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(ROOM_PASSWORD ? { "x-room-password": ROOM_PASSWORD } : {})
-    },
-    cache: "no-store",
-    body: JSON.stringify({ type: "rtc", channel })
-  });
-  if (!res.ok) throw new Error(`Token HTTP ${res.status}`);
-  const data = await res.json();
-  if (!data?.token || typeof data?.uid !== "number") throw new Error("Bad token payload");
-  return data;
-}
-
-function tokenUrl(path) {
-  const base = TOKEN_API_BASE.replace(/\/$/, "");
-  const p = String(path || "").replace(/^\//, "");
-  return `${base}/${p}`;
-}
-
 async function toggleMic() {
   if (!localTracks.audio) return;
 
@@ -420,16 +481,6 @@ function updateMicUI() {
 
 async function leave() {
   try {
-    // Notify others about leaving
-    if (isDataStreamReady()) {
-      const leaveMessage = {
-        type: 'user-left',
-        user: displayName,
-        timestamp: Date.now()
-      };
-      sendDataMessage(leaveMessage);
-    }
-    
     if (localTracks.audio) {
       localTracks.audio.stop();
       localTracks.audio.close();
@@ -487,7 +538,6 @@ function setupEventListeners() {
 function setupAgoraEventListeners() {
   if (!client) return;
   
-  // User events
   client.on("user-published", async (user, mediaType) => {
     console.log("User published:", user.uid, mediaType);
     await client.subscribe(user, mediaType);
@@ -514,11 +564,10 @@ function setupAgoraEventListeners() {
       setTimeout(async () => {
         try {
           await broadcastVideoState(currentVideoUrl, videoTitle.textContent, currentVideoInfo);
-          console.log('Sent video state to new user:', user.uid);
         } catch (error) {
           console.error('Failed to send video state to new user:', error);
         }
-      }, 1000);
+      }, 1500);
     }
   });
   
@@ -540,47 +589,50 @@ function setupAgoraEventListeners() {
     addChatMessage('System', `User ${user.uid} left the room`, false);
   });
   
-  // Connection state monitoring
   client.on("connection-state-change", (curState, prevState) => {
     console.log('Connection state changed:', prevState, '->', curState);
     if (curState === 'DISCONNECTED') {
       addChatMessage('System', 'Connection lost. Attempting to reconnect...', false);
     } else if (curState === 'CONNECTED') {
       addChatMessage('System', 'Connection restored', false);
-      // Resync video if host reconnects
-      if (isHost && currentVideoUrl && isInitialized) {
+      // Try to reinitialize data stream
+      if (isHost && currentVideoUrl) {
         setTimeout(() => {
-          broadcastVideoState(currentVideoUrl, videoTitle.textContent, currentVideoInfo);
+          initializeDataStream(1);
         }, 1000);
       }
-    } else if (curState === 'RECONNECTING') {
-      addChatMessage('System', 'Reconnecting...', false);
     }
   });
 }
 
 function sendMessage() {
   const text = messageInput.value.trim();
-  if (!text || !isDataStreamReady()) return;
+  if (!text) return;
   
-  try {
-    const message = {
-      type: 'chat-message',
-      sender: displayName,
-      text: text,
-      timestamp: Date.now()
-    };
-    
-    if (sendDataMessage(message)) {
-      addChatMessage(displayName, text, true);
-      messageInput.value = '';
-    } else {
-      addChatMessage('System', 'Failed to send message - try again', true);
+  // Try to use data stream if available
+  if (isDataStreamReady()) {
+    try {
+      const message = {
+        type: 'chat-message',
+        sender: displayName,
+        text: text,
+        timestamp: Date.now()
+      };
+      
+      if (sendDataMessage(message)) {
+        addChatMessage(displayName, text, true);
+        messageInput.value = '';
+        return;
+      }
+    } catch (error) {
+      console.error('Failed to send message via data stream:', error);
     }
-  } catch (error) {
-    console.error('Failed to send message:', error);
-    addChatMessage('System', 'Error sending message', true);
   }
+  
+  // Fallback: local chat only
+  addChatMessage(displayName, text, true);
+  addChatMessage('System', 'Note: Message not sent to others (connection issue)', true);
+  messageInput.value = '';
 }
 
 // ===== Initialize =====
@@ -600,45 +652,27 @@ async function init() {
     // Set up Agora event listeners
     setupAgoraEventListeners();
     
-    // Fetch token and join
-    const tokenData = await fetchRtcToken({ channel: channelName });
+    // Fetch token with fallback
+    const tokenData = await fetchRtcTokenWithFallback({ channel: channelName });
+    
+    // Join channel
     await client.join(APP_ID, channelName, tokenData.token, tokenData.uid);
     
     // Determine if host (first user in room)
     isHost = client.remoteUsers.length === 0;
     console.log("Is host:", isHost);
     
-    // Create data stream with retry
-    let dataStreamCreated = false;
-    let retries = 3;
-    
-    while (!dataStreamCreated && retries > 0) {
-      try {
-        dataStream = await client.createDataStream({
-          ordered: true,
-          reliable: true
-        });
-        
-        // Set up data stream event listener immediately
-        dataStream.on("message", (message) => {
-          handleDataMessage(message);
-        });
-        
-        dataStreamCreated = true;
-        console.log('Data stream created successfully');
-      } catch (streamError) {
-        retries--;
-        console.warn(`Data stream creation failed, ${retries} retries left:`, streamError);
-        if (retries > 0) {
-          await new Promise(resolve => setTimeout(resolve, 1000));
-        }
+    // Initialize data stream (but don't block if it fails)
+    initializeDataStream().then(success => {
+      if (success) {
+        console.log("Data stream initialized successfully");
+        addChatMessage('System', 'Sync features enabled', false);
+      } else {
+        console.warn("Data stream initialization failed - limited functionality");
+        addChatMessage('System', 'Note: Video sync may not work', false);
       }
-    }
-    
-    if (!dataStreamCreated) {
-      console.error('Failed to create data stream after 3 attempts');
-      addChatMessage('System', 'Warning: Some features may not work properly', false);
-    }
+      updateParticipantsList();
+    });
     
     // Create and publish audio track
     try {
@@ -669,7 +703,7 @@ async function init() {
     
   } catch (error) {
     console.error('Initialization failed:', error);
-    alert('Failed to join room. Please try again.');
+    alert('Failed to join room. Please check your connection and try again.');
     window.location = "lobby.html";
   }
 }
@@ -681,6 +715,7 @@ console.log("Starting watch initialization...");
     await init();
   } catch (error) {
     console.error('Watch initialization failed:', error);
+    alert('Failed to initialize: ' + error.message);
     window.location = "lobby.html";
   }
 })();
